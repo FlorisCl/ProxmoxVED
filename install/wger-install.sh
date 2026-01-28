@@ -87,7 +87,6 @@ set -a && source /opt/wger/.env && set +a
 
 $STD uv run python manage.py migrate
 $STD uv run wger bootstrap
-$STD uv run wger load-online-fixtures
 $STD uv run python manage.py collectstatic --no-input
 
 cat <<EOF | uv run python manage.py shell
