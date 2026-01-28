@@ -3987,7 +3987,7 @@ chmod +x /etc/profile.d/term.sh" || true
   trap - ERR         # Remove ERR trap completely
 
   lxc-attach -n "$CTID" -- bash -s <<'EOF'
-$(curl -fsSL https://raw.githubusercontent.com/FlorisCl/ProxmoxVED/feature/expand-wger-with-celery-and-gunicorn/install/${var_install}.sh)
+$(curl -fsSL https://raw.githubusercontent.com/FlorisCl/ProxmoxVED/feature/expand-wger-with-celery-and-gunicorn/install/wger-install.sh)
 EOF
 
   local lxc_exit=$?
