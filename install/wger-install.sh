@@ -89,15 +89,6 @@ $STD uv run python manage.py migrate
 $STD uv run wger bootstrap
 $STD uv run python manage.py collectstatic --no-input
 
-cat <<EOF | uv run python manage.py shell
-from django.contrib.auth import get_user_model
-User = get_user_model()
-u = User.objects.create_user("admin", "admin@localhost", "${PG_DB_PASS}")
-u.is_staff = True
-u.is_superuser = True
-u.save()
-EOF
-
 msg_ok "wger configured"
 
 msg_info "Creating Gunicorn service"
