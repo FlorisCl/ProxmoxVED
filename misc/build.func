@@ -3986,7 +3986,8 @@ chmod +x /etc/profile.d/term.sh" || true
   set +Eeuo pipefail # Disable ALL error handling temporarily
   trap - ERR         # Remove ERR trap completely
 
-  lxc-attach -n "$CTID" -- bash -c "$(curl -fsSL https://raw.githubusercontent.com/FlorisCl/ProxmoxVED/feature/expand-wger-with-celery-and-gunicorn/misc/build.func)"
+  lxc-attach -n "$CTID" -- bash -c \
+  "$(curl -fsSL https://raw.githubusercontent.com/FlorisCl/ProxmoxVED/feature/expand-wger-with-celery-and-gunicorn/install/${var_install}.sh)"
   local lxc_exit=$?
 
   set -Eeuo pipefail       # Re-enable error handling
