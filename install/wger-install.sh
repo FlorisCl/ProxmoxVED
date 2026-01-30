@@ -58,6 +58,7 @@ DJANGO_DB_USER=${PG_DB_USER}
 DJANGO_DB_PASSWORD=${PG_DB_PASS}
 DJANGO_DB_HOST=localhost
 DJANGO_DB_PORT=5432
+DATABASE_URL=postgresql://${PG_DB_USER}:${PG_DB_PASS}@localhost:5432/${PG_DB_NAME}
 
 DJANGO_MEDIA_ROOT=/opt/wger/media
 DJANGO_STATIC_ROOT=/opt/wger/static
@@ -115,7 +116,7 @@ EOF
 msg_ok "Gunicorn service created"
 
 msg_info "Creating Celery worker service"
-cat <<EOF >/etc/systemd/system/wger-celery.service
+cat <<EOF >/etc/systemd/system/celery.service
 [Unit]
 Description=wger Celery Worker
 After=network.target redis-server.service
@@ -136,7 +137,7 @@ msg_info "Creating Celery beat service"
 mkdir -p /var/lib/wger/celery
 chmod 700 /var/lib/wger/celery
 
-cat <<EOF >/etc/systemd/system/wger-celery-beat.service
+cat <<EOF >/etc/systemd/system/celery-beat.service
 [Unit]
 Description=wger Celery Beat
 After=network.target redis-server.service
@@ -187,7 +188,7 @@ msg_ok "Nginx configured"
 
 systemctl daemon-reexec
 systemctl daemon-reload
-systemctl enable --now redis-server nginx wger wger-celery wger-celery-beat
+systemctl enable --now redis-server nginx wger celery celery-beat
 
 motd_ssh
 customize
