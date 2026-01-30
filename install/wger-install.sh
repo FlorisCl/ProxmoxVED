@@ -194,13 +194,16 @@ server {
 }
 EOF
 
-ln -sf /etc/nginx/sites-available/wger /etc/nginx/sites-enabled/wger
-rm -f /etc/nginx/sites-enabled/default
 msg_ok "Nginx configured"
 
 systemctl daemon-reexec
 systemctl daemon-reload
 systemctl enable --now redis-server nginx wger celery celery-beat
+
+$STD rm -f /etc/nginx/sites-enabled/default
+$STD ln -sf /etc/nginx/sites-available/wger /etc/nginx/sites-enabled/wger
+
+systemctl restart nginx
 
 motd_ssh
 customize
