@@ -87,8 +87,20 @@ EOF
 set -a && source /opt/wger/.env && set +a
 
 $STD uv run python manage.py migrate
+$STD uv run python manage.py loaddata languages
+$STD uv run python manage.py loaddata gym_config
+$STD uv run python manage.py loaddata groups
 $STD uv run wger bootstrap
 $STD uv run python manage.py collectstatic --no-input
+
+cat <<EOF | uv run python manage.py shell
+from django.contrib.auth import get_user_model
+UserModel = get_user_model()
+user = UserModel.objects.create_user('admin', email='admin@localhost', password='${PG_DB_PASS}')
+user.is_superuser = True
+user.is_staff = True
+user.save()
+EOF
 
 msg_ok "wger configured"
 
@@ -156,7 +168,7 @@ EOF
 msg_ok "Celery beat service created"
 
 msg_info "Configuring Nginx"
-cat <<'EOF' >/etc/nginx/sites-available/wger
+    cat <<'EOF' >/etc/nginx/sites-available/wger
 server {
     listen 3000;
     server_name _;
