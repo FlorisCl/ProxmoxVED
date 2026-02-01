@@ -86,12 +86,9 @@ EOF
 
 set -a && source /opt/wger/.env && set +a
 
-$STD uv run python manage.py migrate
-$STD uv run python manage.py loaddata languages
-$STD uv run python manage.py loaddata gym_config
-$STD uv run python manage.py loaddata groups
 $STD uv run wger bootstrap
 $STD uv run python manage.py collectstatic --no-input
+$STD uv run wger load-online-fixtures
 
 cat <<EOF | uv run python manage.py shell
 from django.contrib.auth import get_user_model

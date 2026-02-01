@@ -31,7 +31,7 @@ function update_script() {
 
   if check_for_gh_release "wger" "wger-project/wger"; then
     msg_info "Stopping Service"
-    systemctl stop apache2
+    systemctl stop redis-server nginx celery celery-beat wger
     msg_ok "Stopped Service"
 
     msg_info "Backing up Data"
@@ -52,13 +52,14 @@ function update_script() {
     set -a && source /opt/wger/.env && set +a
     export DJANGO_SETTINGS_MODULE=settings.main
     $STD uv pip install .
+    $STD uv pip install gunicorn celery django-redis psycopg2-binary
     $STD uv run python manage.py migrate
     $STD uv run python manage.py collectstatic --no-input
     msg_ok "Updated wger"
 
-    msg_info "Starting Service"
-    systemctl start apache2
-    msg_ok "Started Service"
+    msg_info "Starting Services"
+    systemctl start redis-server nginx celery celery-beat wger
+    msg_ok "Started Services"
     msg_ok "Updated Successfully"
   fi
   exit
