@@ -29,7 +29,7 @@ function update_script() {
     exit
   fi
 
-#   if check_for_gh_release "wger" "wger-project/wger"; then
+  if check_for_gh_release "wger" "wger-project/wger"; then
     msg_info "Stopping Service"
     systemctl stop redis-server nginx celery celery-beat wger
     msg_ok "Stopped Service"
@@ -61,8 +61,8 @@ function update_script() {
     systemctl start redis-server nginx celery celery-beat wger
     msg_ok "Started Services"
     msg_ok "Updated Successfully"
-#   fi
-#   exit
+  fi
+  exit
 }
 
 start
