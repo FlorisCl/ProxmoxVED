@@ -14,7 +14,7 @@ network_check
 update_os
 
 msg_info "Installing Dependencies"
-$STD apt-get install -y \
+$STD apt install -y \
   build-essential \
   nginx \
   redis-server \
@@ -44,7 +44,7 @@ $STD npm run build:css:sass
 
 $STD uv venv
 $STD uv pip install .
-$STD uv pip install gunicorn celery django-redis psycopg2-binary
+$STD uv pip install psycopg2-binary
 
 SECRET_KEY=$(openssl rand -base64 40)
 
@@ -199,8 +199,6 @@ EOF
 
 msg_ok "Nginx configured"
 
-systemctl daemon-reexec
-systemctl daemon-reload
 systemctl enable --now redis-server nginx wger celery celery-beat
 
 $STD rm -f /etc/nginx/sites-enabled/default
