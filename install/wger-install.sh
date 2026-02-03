@@ -157,7 +157,7 @@ Restart=always
 WantedBy=multi-user.target
 EOF
 
-    cat <<'EOF' >/etc/nginx/sites-available/wger
+    cat <<EOF >/etc/nginx/sites-available/wger
 server {
     listen 3000;
     server_name _;
@@ -182,14 +182,11 @@ server {
     }
 }
 EOF
-
-msg_ok "Created Config and Services"
-
 $STD rm -f /etc/nginx/sites-enabled/default
 $STD ln -sf /etc/nginx/sites-available/wger /etc/nginx/sites-enabled/wger
 systemctl enable -q --now redis-server nginx wger celery celery-beat
-
 systemctl restart nginx
+msg_ok "Created Config and Services"
 
 motd_ssh
 customize
