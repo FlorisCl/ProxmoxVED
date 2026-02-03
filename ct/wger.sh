@@ -45,6 +45,7 @@ function update_script() {
     cp -r /opt/wger_media_backup/. /opt/wger/media
     cp /opt/wger_env_backup /opt/wger/.env
     rm -rf /opt/wger_media_backup /opt/wger_env_backup
+
     msg_ok "Restored Data"
 
     msg_info "Updating wger"
@@ -52,7 +53,7 @@ function update_script() {
     set -a && source /opt/wger/.env && set +a
     export DJANGO_SETTINGS_MODULE=settings.main
     $STD uv pip install .
-    $STD uv pip install gunicorn celery django-redis psycopg2-binary
+    $STD uv pip install gunicorn psycopg2-binary
     $STD uv run python manage.py migrate
     $STD uv run python manage.py collectstatic --no-input
     msg_ok "Updated wger"
