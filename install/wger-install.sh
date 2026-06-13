@@ -2,7 +2,7 @@
 
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: Slaviša Arežina (tremor021)
-# License: MIT | https://github.com/community-scripts/ProxmoxVED/raw/main/LICENSE
+# License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 # Source: https://github.com/wger-project/wger
 
 source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
@@ -21,12 +21,11 @@ $STD apt install -y \
   libpq-dev
 msg_ok "Installed Dependencies"
 
-import_local_ip
 NODE_VERSION="22" NODE_MODULE="sass" setup_nodejs
 setup_uv
 PG_VERSION="16" setup_postgresql
 PG_DB_NAME="wger" PG_DB_USER="wger" setup_postgresql_db
-fetch_and_deploy_gh_release "wger" "wger-project/wger" "tarball" "latest" "/opt/wger"
+fetch_and_deploy_gh_release "wger" "wger-project/wger" "tarball"
 fetch_and_deploy_gh_release "powersync" "powersync-ja/powersync-service" "tarball"
 
 msg_info "Setting up wger"
@@ -166,7 +165,7 @@ server {
 
     location / {
         proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_redirect off;
