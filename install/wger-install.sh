@@ -27,6 +27,7 @@ setup_uv
 PG_VERSION="16" setup_postgresql
 PG_DB_NAME="wger" PG_DB_USER="wger" setup_postgresql_db
 fetch_and_deploy_gh_release "wger" "wger-project/wger" "tarball" "latest" "/opt/wger"
+fetch_and_deploy_gh_release "powersync" "powersync-ja/powersync-service" "tarball"
 
 msg_info "Setting up wger"
 mkdir -p /opt/wger/{static,media}
