@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: tteck (tteckster) | MickLesk | michelroegl-brunner
-# License: MIT | https://github.com/community-scripts/ProxmoxVED/raw/branch/main/LICENSE
-# Revision: 1
+# License: MIT | https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main/LICENSE
 
 # ==============================================================================
 # BUILD.FUNC - LXC CONTAINER BUILD & CONFIGURATION
@@ -46,9 +45,16 @@ variables() {
   DIAGNOSTICS="yes"                                 # sets the DIAGNOSTICS variable to "yes", used for the API call.
   METHOD="default"                                  # sets the METHOD variable to "default", used for the API call.
   RANDOM_UUID="$(cat /proc/sys/kernel/random/uuid)" # generates a random UUID and sets it to the RANDOM_UUID variable.
-  SESSION_ID="${RANDOM_UUID:0:8}"                   # Short session ID (first 8 chars of UUID) for log files
-  BUILD_LOG="/tmp/create-lxc-${SESSION_ID}.log"     # Host-side container creation log
+
+  SESSION_ID="${RANDOM_UUID:0:8}"                        # Short session ID (first 8 chars of UUID) for log files
+  BUILD_LOG="/tmp/create-lxc-${SESSION_ID}.log"          # Host-side container creation log
+  combined_log="/tmp/install-${SESSION_ID}-combined.log" # Combined log (build + install) for failed installations
   CTTYPE="${CTTYPE:-${CT_TYPE:-1}}"
+
+  # ARM64 Template default variables
+  DEBIAN_DEFAULT_CODENAME="trixie"
+  UBUNTU_DEFAULT_CODENAME="noble"
+  ALPINE_DEFAULT_VERSION="3.23"
 
   # Parse dev_mode early
   parse_dev_mode
@@ -57,6 +63,7 @@ variables() {
   if [[ "${DEV_MODE_LOGS:-false}" == "true" ]]; then
     mkdir -p /var/log/community-scripts
     BUILD_LOG="/var/log/community-scripts/create-lxc-${SESSION_ID}-$(date +%Y%m%d_%H%M%S).log"
+    combined_log="/var/log/community-scripts/install-${SESSION_ID}-combined-$(date +%Y%m%d_%H%M%S).log"
   fi
 
   # Get Proxmox VE version and kernel version
@@ -81,180 +88,581 @@ variables() {
   fi
 }
 
-# -----------------------------------------------------------------------------
-# Community-Scripts bootstrap loader
-# - Always sources build.func from remote
-# - Updates local core files only if build.func changed
-# - Local cache: /usr/local/community-scripts/core
-# -----------------------------------------------------------------------------
+# Configurable base URL for development — override with COMMUNITY_SCRIPTS_URL
+# See docs/DEV_MODE.md for details
+COMMUNITY_SCRIPTS_URL="${COMMUNITY_SCRIPTS_URL:-https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main}"
 
-# FUNC_DIR="/usr/local/community-scripts/core"
-# mkdir -p "$FUNC_DIR"
-
-# BUILD_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main/misc/build.func"
-# BUILD_REV="$FUNC_DIR/build.rev"
-# DEVMODE="${DEVMODE:-no}"
-
-# # --- Step 1: fetch build.func content once, compute hash ---
-# build_content="$(curl -fsSL "$BUILD_URL")" || {
-#   echo "❌ Failed to fetch build.func"
-#   exit 1
-# }
-
-# newhash=$(printf "%s" "$build_content" | sha256sum | awk '{print $1}')
-# oldhash=$(cat "$BUILD_REV" 2>/dev/null || echo "")
-
-# # --- Step 2: if build.func changed, offer update for core files ---
-# if [ "$newhash" != "$oldhash" ]; then
-#   echo "⚠️  build.func changed!"
-
-#   while true; do
-#     read -rp "Refresh local core files? [y/N/diff]: " ans
-#     case "$ans" in
-#     [Yy]*)
-#       echo "$newhash" >"$BUILD_REV"
-
-#       update_func_file() {
-#         local file="$1"
-#         local url="https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main/misc/$file"
-#         local local_path="$FUNC_DIR/$file"
-
-#         echo "⬇️  Downloading $file ..."
-#         curl -fsSL "$url" -o "$local_path" || {
-#           echo "❌ Failed to fetch $file"
-#           exit 1
-#         }
-#         echo "✔️  Updated $file"
-#       }
-
-#       update_func_file core.func
-#       update_func_file error_handler.func
-#       update_func_file tools.func
-#       break
-#       ;;
-#     [Dd]*)
-#       for file in core.func error_handler.func tools.func; do
-#         local_path="$FUNC_DIR/$file"
-#         url="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/$file"
-#         remote_tmp="$(mktemp)"
-
-#         curl -fsSL "$url" -o "$remote_tmp" || continue
-
-#         if [ -f "$local_path" ]; then
-#           echo "🔍 Diff for $file:"
-#           diff -u "$local_path" "$remote_tmp" || echo "(no differences)"
-#         else
-#           echo "📦 New file $file will be installed"
-#         fi
-
-#         rm -f "$remote_tmp"
-#       done
-#       ;;
-#     *)
-#       echo "❌ Skipped updating local core files"
-#       break
-#       ;;
-#     esac
-#   done
-# else
-#   if [ "$DEVMODE" != "yes" ]; then
-#     echo "✔️  build.func unchanged → using existing local core files"
-#   fi
-# fi
-
-# if [ -n "${_COMMUNITY_SCRIPTS_LOADER:-}" ]; then
-#   return 0 2>/dev/null || exit 0
-# fi
-# _COMMUNITY_SCRIPTS_LOADER=1
-
-# # --- Step 3: always source local versions of the core files ---
-# source "$FUNC_DIR/core.func"
-# source "$FUNC_DIR/error_handler.func"
-# source "$FUNC_DIR/tools.func"
-
-# # --- Step 4: finally, source build.func directly from memory ---
-# # (no tmp file needed)
-# source <(printf "%s" "$build_content")
-
-# ------------------------------------------------------------------------------
-# Load core + error handler functions from community-scripts repo
-#
-# - Prefer curl if available, fallback to wget
-# - Load: core.func, error_handler.func, api.func
-# - Initialize error traps after loading
-# ------------------------------------------------------------------------------
-
-source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/api.func)
+source <(curl -fsSL "$COMMUNITY_SCRIPTS_URL/misc/api.func")
 
 if command -v curl >/dev/null 2>&1; then
-  source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/core.func)
-  source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/error_handler.func)
+  source <(curl -fsSL "$COMMUNITY_SCRIPTS_URL/misc/core.func")
+  source <(curl -fsSL "$COMMUNITY_SCRIPTS_URL/misc/error_handler.func")
   load_functions
   catch_errors
-  #echo "(build.func) Loaded core.func via curl"
 elif command -v wget >/dev/null 2>&1; then
-  source <(wget -qO- https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/core.func)
-  source <(wget -qO- https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/error_handler.func)
+  source <(wget -qO- "$COMMUNITY_SCRIPTS_URL/misc/core.func")
+  source <(wget -qO- "$COMMUNITY_SCRIPTS_URL/misc/error_handler.func")
   load_functions
   catch_errors
-  #echo "(build.func) Loaded core.func via wget"
 fi
 
 # ==============================================================================
 # SECTION 2: PRE-FLIGHT CHECKS & SYSTEM VALIDATION
 # ==============================================================================
+#
+# Runs comprehensive system checks BEFORE container creation to catch common
+# issues early. This prevents users from going through the entire configuration
+# menu only to have creation fail due to a system-level problem.
+#
+# Checks performed (via run_preflight):
+#   - Kernel: keyring limits (maxkeys/maxbytes for UID 100000)
+#   - Storage: rootdir support, vztmpl support, available space
+#   - Network: bridge availability, DNS resolution
+#   - Repos: enterprise repo subscription validation
+#   - Cluster: quorum status (if clustered)
+#   - Proxmox: LXC stack health, container ID availability
+#   - Template: download server reachability
+#
+# Design:
+#   - All checks run and results are collected (no exit on first failure)
+#   - Clear, actionable error messages with suggested fixes
+#   - Reports "aborted" status to telemetry (not "failed")
+#   - Uses existing exit codes for consistency with error_handler/api.func
+#
+# ==============================================================================
+
+# --- Preflight tracking globals ---
+PREFLIGHT_PASSED=0
+PREFLIGHT_FAILED=0
+PREFLIGHT_WARNINGS=0
+PREFLIGHT_FAILURES=()
+PREFLIGHT_EXIT_CODE=0
 
 # ------------------------------------------------------------------------------
-# maxkeys_check()
+# preflight_pass() / preflight_fail() / preflight_warn()
+#
+# - Track individual check results
+# - preflight_fail stores message + exit_code for summary
+# ------------------------------------------------------------------------------
+preflight_pass() {
+  local msg="$1"
+  ((PREFLIGHT_PASSED++)) || true
+  echo -e "  ${CM} ${GN}${msg}${CL}"
+}
+
+preflight_fail() {
+  local msg="$1"
+  local exit_code="${2:-1}"
+  ((PREFLIGHT_FAILED++)) || true
+  PREFLIGHT_FAILURES+=("${exit_code}|${msg}")
+  [[ "$PREFLIGHT_EXIT_CODE" -eq 0 ]] && PREFLIGHT_EXIT_CODE="$exit_code"
+  echo -e "  ${CROSS} ${RD}${msg}${CL}"
+}
+
+preflight_warn() {
+  local msg="$1"
+  ((PREFLIGHT_WARNINGS++)) || true
+  echo -e "  ${INFO} ${YW}${msg}${CL}"
+}
+
+# ------------------------------------------------------------------------------
+# preflight_maxkeys()
 #
 # - Reads kernel keyring limits (maxkeys, maxbytes)
 # - Checks current usage for LXC user (UID 100000)
 # - Warns if usage is close to limits and suggests sysctl tuning
-# - Exits if thresholds are exceeded
-# - https://cleveruptime.com/docs/files/proc-key-users | https://docs.kernel.org/security/keys/core.html
+# - https://cleveruptime.com/docs/files/proc-key-users
+# - https://docs.kernel.org/security/keys/core.html
 # ------------------------------------------------------------------------------
-
-maxkeys_check() {
-  # Read kernel parameters
+preflight_maxkeys() {
+  local per_user_maxkeys per_user_maxbytes
   per_user_maxkeys=$(cat /proc/sys/kernel/keys/maxkeys 2>/dev/null || echo 0)
   per_user_maxbytes=$(cat /proc/sys/kernel/keys/maxbytes 2>/dev/null || echo 0)
 
-  # Exit if kernel parameters are unavailable
   if [[ "$per_user_maxkeys" -eq 0 || "$per_user_maxbytes" -eq 0 ]]; then
-    echo -e "${CROSS}${RD} Error: Unable to read kernel parameters. Ensure proper permissions.${CL}"
-    exit 1
+    preflight_fail "Unable to read kernel key parameters" 107
+    echo -e "    ${TAB}${INFO} Ensure proper permissions to /proc/sys/kernel/keys/"
+    return 0
   fi
 
-  # Fetch key usage for user ID 100000 (typical for containers)
+  local used_lxc_keys used_lxc_bytes
   used_lxc_keys=$(awk '/100000:/ {print $2}' /proc/key-users 2>/dev/null || echo 0)
   used_lxc_bytes=$(awk '/100000:/ {split($5, a, "/"); print a[1]}' /proc/key-users 2>/dev/null || echo 0)
 
-  # Calculate thresholds and suggested new limits
-  threshold_keys=$((per_user_maxkeys - 100))
-  threshold_bytes=$((per_user_maxbytes - 1000))
-  new_limit_keys=$((per_user_maxkeys * 2))
-  new_limit_bytes=$((per_user_maxbytes * 2))
+  local threshold_keys=$((per_user_maxkeys - 100))
+  local threshold_bytes=$((per_user_maxbytes - 1000))
+  local new_limit_keys=$((per_user_maxkeys * 2))
+  local new_limit_bytes=$((per_user_maxbytes * 2))
 
-  # Check if key or byte usage is near limits
-  failure=0
+  local failure=0
   if [[ "$used_lxc_keys" -gt "$threshold_keys" ]]; then
-    echo -e "${CROSS}${RD} Warning: Key usage is near the limit (${used_lxc_keys}/${per_user_maxkeys}).${CL}"
-    echo -e "${INFO} Suggested action: Set ${GN}kernel.keys.maxkeys=${new_limit_keys}${CL} in ${BOLD}/etc/sysctl.d/98-community-scripts.conf${CL}."
     failure=1
   fi
   if [[ "$used_lxc_bytes" -gt "$threshold_bytes" ]]; then
-    echo -e "${CROSS}${RD} Warning: Key byte usage is near the limit (${used_lxc_bytes}/${per_user_maxbytes}).${CL}"
-    echo -e "${INFO} Suggested action: Set ${GN}kernel.keys.maxbytes=${new_limit_bytes}${CL} in ${BOLD}/etc/sysctl.d/98-community-scripts.conf${CL}."
     failure=1
   fi
 
-  # Provide next steps if issues are detected
   if [[ "$failure" -eq 1 ]]; then
-    echo -e "${INFO} To apply changes, run: ${BOLD}service procps force-reload${CL}"
-    exit 1
+    preflight_fail "Kernel key limits near threshold (keys: ${used_lxc_keys}/${per_user_maxkeys}, bytes: ${used_lxc_bytes}/${per_user_maxbytes})" 108
+    echo -e "    ${TAB}${INFO} Set ${GN}kernel.keys.maxkeys=${new_limit_keys}${CL} and ${GN}kernel.keys.maxbytes=${new_limit_bytes}${CL}"
+    echo -e "    ${TAB}${INFO} in ${BOLD}/etc/sysctl.d/98-community-scripts.conf${CL}, then run: ${GN}sysctl --system${CL}"
+    return 0
   fi
 
-  # Silent success - only show errors if they exist
+  preflight_pass "Kernel key limits OK (keys: ${used_lxc_keys}/${per_user_maxkeys})"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# preflight_storage_rootdir()
+#
+# - Verifies at least one storage supports 'rootdir' content type
+# - Without this, no LXC container can be created
+# ------------------------------------------------------------------------------
+preflight_storage_rootdir() {
+  local count
+  count=$(pvesm status -content rootdir 2>/dev/null | awk 'NR>1 {count++} END {print count+0}')
+
+  if [[ "$count" -eq 0 ]]; then
+    preflight_fail "No storage with 'rootdir' support found" 119
+    echo -e "    ${TAB}${INFO} Enable 'rootdir' content on a storage in Datacenter → Storage"
+    return 0
+  fi
+
+  preflight_pass "Storage with 'rootdir' support available (${count} storage(s))"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# preflight_storage_vztmpl()
+#
+# - Verifies at least one storage supports 'vztmpl' content type
+# - Required for downloading and storing OS templates
+# ------------------------------------------------------------------------------
+preflight_storage_vztmpl() {
+  local count
+  count=$(pvesm status -content vztmpl 2>/dev/null | awk 'NR>1 {count++} END {print count+0}')
+
+  if [[ "$count" -eq 0 ]]; then
+    preflight_fail "No storage with 'vztmpl' support found" 120
+    echo -e "    ${TAB}${INFO} Enable 'vztmpl' content on a storage in Datacenter → Storage"
+    return 0
+  fi
+
+  preflight_pass "Storage with 'vztmpl' support available (${count} storage(s))"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# preflight_storage_space()
+#
+# - Checks if any rootdir-capable storage has enough free space
+# - Uses the app-declared var_disk as minimum requirement
+# ------------------------------------------------------------------------------
+preflight_storage_space() {
+  local required_gb="${var_disk:-4}"
+  local required_kb=$((required_gb * 1024 * 1024))
+  local has_enough=0
+  local best_storage=""
+  local best_free=0
+
+  while read -r storage_name _ _ _ _ free_kb _; do
+    [[ -z "$storage_name" || -z "$free_kb" ]] && continue
+    [[ "$free_kb" == "0" ]] && continue
+
+    if [[ "$free_kb" -ge "$required_kb" ]]; then
+      has_enough=1
+      if [[ "$free_kb" -gt "$best_free" ]]; then
+        best_free="$free_kb"
+        best_storage="$storage_name"
+      fi
+    fi
+  done < <(pvesm status -content rootdir 2>/dev/null | awk 'NR>1')
+
+  if [[ "$has_enough" -eq 0 ]]; then
+    preflight_fail "No storage has enough space (need ${required_gb}GB for ${APP})" 214
+    echo -e "    ${TAB}${INFO} Free up disk space or add a new storage with sufficient capacity"
+    return 0
+  fi
+
+  local best_free_fmt
+  best_free_fmt=$(numfmt --to=iec --from-unit=1024 --suffix=B --format %.1f "$best_free" 2>/dev/null || echo "${best_free}KB")
+  preflight_pass "Sufficient storage space (${best_storage}: ${best_free_fmt} free, need ${required_gb}GB)"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# preflight_network_bridge()
+#
+# - Checks if at least one network bridge exists (vmbr*)
+# - Verifies vmbr0 specifically (default bridge used by most scripts)
+# ------------------------------------------------------------------------------
+preflight_network_bridge() {
+  local bridges
+  bridges=$(ip -o link show type bridge 2>/dev/null | grep -oE 'vmbr[0-9]+' | sort -u)
+
+  if [[ -z "$bridges" ]]; then
+    preflight_fail "No network bridge (vmbr*) found" 116
+    echo -e "    ${TAB}${INFO} Create a bridge in Network → Create → Linux Bridge"
+    return 0
+  fi
+
+  if echo "$bridges" | grep -qx "vmbr0"; then
+    preflight_pass "Default network bridge vmbr0 available"
+  else
+    local first_bridge
+    first_bridge=$(echo "$bridges" | head -1)
+    preflight_warn "Default bridge vmbr0 not found, but ${first_bridge} is available"
+    echo -e "    ${TAB}${INFO} Scripts default to vmbr0 — use Advanced Settings to select ${first_bridge}"
+  fi
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# preflight_dns_resolution()
+#
+# - Tests if DNS resolution works (required for template downloads)
+# - Tries multiple hosts to avoid false positives
+# ------------------------------------------------------------------------------
+preflight_dns_resolution() {
+  local test_hosts=("download.proxmox.com" "raw.githubusercontent.com" "community-scripts.org")
+  local resolved=0
+
+  for host in "${test_hosts[@]}"; do
+    if getent hosts "$host" &>/dev/null; then
+      resolved=1
+      break
+    fi
+  done
+
+  if [[ "$resolved" -eq 0 ]]; then
+    for host in "${test_hosts[@]}"; do
+      if command -v nslookup &>/dev/null && nslookup "$host" &>/dev/null; then
+        resolved=1
+        break
+      fi
+    done
+  fi
+
+  if [[ "$resolved" -eq 0 ]]; then
+    preflight_fail "DNS resolution failed — cannot reach template servers" 222
+    echo -e "    ${TAB}${INFO} Check /etc/resolv.conf and network connectivity"
+    return 0
+  fi
+
+  preflight_pass "DNS resolution working"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# preflight_repo_access()
+#
+# - Checks if Proxmox enterprise repos are enabled without a valid subscription
+# - Scans /etc/apt/sources.list.d/ for enterprise.proxmox.com entries
+# - Tests HTTP access to detect 401 Unauthorized
+# - Warning only (not a blocker — packages come from no-subscription repo)
+# ------------------------------------------------------------------------------
+preflight_repo_access() {
+  local enterprise_files
+  enterprise_files=$(grep -rlE '^\s*deb\s+https://enterprise\.proxmox\.com' /etc/apt/sources.list.d/ 2>/dev/null || true)
+
+  if [[ -z "$enterprise_files" ]]; then
+    preflight_pass "No enterprise repositories enabled"
+    return 0
+  fi
+
+  # Enterprise repo found — test if subscription is valid
+  local http_code
+  http_code=$(curl -sS -o /dev/null -w "%{http_code}" -m 5 "https://enterprise.proxmox.com/debian/pve/dists/" 2>/dev/null) || http_code="000"
+
+  if [[ "$http_code" == "401" || "$http_code" == "403" ]]; then
+    preflight_warn "Enterprise repo enabled without valid subscription (HTTP ${http_code})"
+    echo -e "    ${TAB}${INFO} apt-get update will show '401 Unauthorized' errors"
+    echo -e "    ${TAB}${INFO} Disable in ${GN}/etc/apt/sources.list.d/${CL} or add a subscription key"
+    return 0
+  fi
+
+  if [[ "$http_code" =~ ^2[0-9]{2}$ ]]; then
+    preflight_pass "Enterprise repository accessible (subscription valid)"
+  else
+    preflight_warn "Enterprise repo check inconclusive (HTTP ${http_code})"
+  fi
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# preflight_cluster_quorum()
+#
+# - Checks cluster quorum status (only if node is part of a cluster)
+# - Skipped on standalone nodes
+# ------------------------------------------------------------------------------
+preflight_cluster_quorum() {
+  if [[ ! -f /etc/pve/corosync.conf ]]; then
+    preflight_pass "Standalone node (no cluster quorum needed)"
+    return 0
+  fi
+
+  if pvecm status 2>/dev/null | awk -F':' '/^Quorate/ { exit ($2 ~ /Yes/) ? 0 : 1 }'; then
+    preflight_pass "Cluster is quorate"
+    return 0
+  fi
+
+  preflight_fail "Cluster is not quorate — container operations will fail" 210
+  echo -e "    ${TAB}${INFO} Ensure all cluster nodes are running, or configure a QDevice"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# preflight_lxc_stack()
+#
+# - Validates pve-container and lxc-pve packages are installed
+# - Checks for available updates (informational only)
+# ------------------------------------------------------------------------------
+preflight_lxc_stack() {
+  local pve_container_ver lxc_pve_ver
+
+  pve_container_ver=$(dpkg-query -W -f='${Version}\n' pve-container 2>/dev/null || echo "")
+  lxc_pve_ver=$(dpkg-query -W -f='${Version}\n' lxc-pve 2>/dev/null || echo "")
+
+  if [[ -z "$pve_container_ver" ]]; then
+    preflight_fail "Package 'pve-container' is not installed" 231
+    echo -e "    ${TAB}${INFO} Run: apt-get install pve-container"
+    return 0
+  fi
+
+  if [[ -z "$lxc_pve_ver" ]]; then
+    preflight_fail "Package 'lxc-pve' is not installed" 231
+    echo -e "    ${TAB}${INFO} Run: apt-get install lxc-pve"
+    return 0
+  fi
+
+  local pve_container_cand lxc_pve_cand
+  pve_container_cand=$(apt-cache policy pve-container 2>/dev/null | awk '/Candidate:/ {print $2}') || true
+  lxc_pve_cand=$(apt-cache policy lxc-pve 2>/dev/null | awk '/Candidate:/ {print $2}') || true
+
+  local update_available=0
+  if [[ -n "$pve_container_cand" && "$pve_container_cand" != "none" ]]; then
+    if dpkg --compare-versions "$pve_container_cand" gt "$pve_container_ver" 2>/dev/null; then
+      update_available=1
+    fi
+  fi
+  if [[ -n "$lxc_pve_cand" && "$lxc_pve_cand" != "none" ]]; then
+    if dpkg --compare-versions "$lxc_pve_cand" gt "$lxc_pve_ver" 2>/dev/null; then
+      update_available=1
+    fi
+  fi
+
+  if [[ "$update_available" -eq 1 ]]; then
+    preflight_warn "LXC stack update available (current: pve-container=${pve_container_ver}, lxc-pve=${lxc_pve_ver})"
+    echo -e "    ${TAB}${INFO} An upgrade will be offered during container creation if needed"
+  else
+    preflight_pass "LXC stack is up to date (pve-container=${pve_container_ver})"
+  fi
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# preflight_container_id()
+#
+# - Verifies that container IDs can be allocated
+# - Uses pvesh /cluster/nextid (cluster-aware)
+# ------------------------------------------------------------------------------
+preflight_container_id() {
+  local nextid
+  nextid=$(pvesh get /cluster/nextid 2>/dev/null) || true
+
+  if [[ -z "$nextid" || ! "$nextid" =~ ^[0-9]+$ ]]; then
+    preflight_fail "Cannot allocate container ID (pvesh /cluster/nextid failed)" 109
+    echo -e "    ${TAB}${INFO} Check Proxmox cluster health and datacenter.cfg ID ranges"
+    return 0
+  fi
+
+  preflight_pass "Container IDs available (next: ${nextid})"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# preflight_template_connectivity()
+#
+# - Tests connectivity to the Proxmox template download server
+# - Warns but does not fail (local templates may be available)
+# ------------------------------------------------------------------------------
+preflight_template_connectivity() {
+  # ARM64 uses custom template sources (GitHub/jenkins), not the pveam catalog
+  if [[ "$(dpkg --print-architecture)" == "arm64" ]]; then
+    preflight_pass "Template connectivity check skipped (ARM64 uses custom template source)"
+    return 0
+  fi
+
+  local http_code
+  http_code=$(curl -sS -o /dev/null -w "%{http_code}" -m 5 "http://download.proxmox.com/images/system/" 2>/dev/null) || http_code="000"
+
+  if [[ "$http_code" =~ ^2[0-9]{2}$ || "$http_code" =~ ^3[0-9]{2}$ ]]; then
+    preflight_pass "Template server reachable (download.proxmox.com)"
+    return 0
+  fi
+
+  local local_count=0
+  while read -r storage_name _; do
+    [[ -z "$storage_name" ]] && continue
+    local count
+    count=$(pveam list "$storage_name" 2>/dev/null | awk 'NR>1' | wc -l)
+    local_count=$((local_count + count))
+  done < <(pvesm status -content vztmpl 2>/dev/null | awk 'NR>1 {print $1}')
+
+  if [[ "$local_count" -gt 0 ]]; then
+    preflight_warn "Template server unreachable, but ${local_count} local template(s) available"
+    return 0
+  fi
+
+  preflight_fail "Template server unreachable and no local templates available" 222
+  echo -e "    ${TAB}${INFO} Check internet connectivity or manually upload templates"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# preflight_template_available()
+#
+# - Validates that a template exists for the configured var_os/var_version
+# - Checks both local templates and the online pveam catalog
+# - Fails if no matching template can be found anywhere
+# ------------------------------------------------------------------------------
+preflight_template_available() {
+  # ARM64 uses custom template sources (GitHub/jenkins), not the pveam catalog
+  if [[ "$(dpkg --print-architecture)" == "arm64" ]]; then
+    preflight_pass "Template check skipped (ARM64 uses custom template source)"
+    return 0
+  fi
+
+  local os="${var_os:-}"
+  local version="${var_version:-}"
+
+  # Skip if os/version not set (e.g. Alpine scripts set them differently)
+  if [[ -z "$os" || -z "$version" ]]; then
+    preflight_pass "Template check skipped (OS/version not configured yet)"
+    return 0
+  fi
+
+  local search_pattern="${os}-${version}"
+
+  # Check local templates first
+  local local_match=0
+  while read -r storage_name _; do
+    [[ -z "$storage_name" ]] && continue
+    if pveam list "$storage_name" 2>/dev/null | awk '{print $1}' | grep -qE "^${storage_name}:vztmpl/${search_pattern}[._-]"; then
+      local_match=1
+      break
+    fi
+  done < <(pvesm status -content vztmpl 2>/dev/null | awk 'NR>1 {print $1}')
+
+  if [[ "$local_match" -eq 1 ]]; then
+    preflight_pass "Template available locally for ${os} ${version}"
+    return 0
+  fi
+
+  # Check online catalog
+  local online_match=0
+  if pveam available -section system 2>/dev/null | awk '{print $2}' | grep -qE "^${search_pattern}[._-]"; then
+    online_match=1
+  fi
+
+  if [[ "$online_match" -eq 1 ]]; then
+    preflight_pass "Template available online for ${os} ${version}"
+    return 0
+  fi
+
+  # Gather available versions for the hint
+  local available_versions
+  available_versions=$(
+    pveam available -section system 2>/dev/null |
+      awk '{print $2}' |
+      grep -oE "^${os}-[0-9]+(\.[0-9]+)?" |
+      sed "s/^${os}-//" |
+      sort -uV 2>/dev/null | tr '\n' ', ' | sed 's/,$//' | sed 's/,/, /g'
+  )
+
+  preflight_fail "No template found for ${os} ${version}" 225
+  if [[ -n "$available_versions" ]]; then
+    echo -e "    ${TAB}${INFO} Available ${os} versions: ${GN}${available_versions}${CL}"
+  fi
+  echo -e "    ${TAB}${INFO} Check var_version in your CT script or use an available version"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# run_preflight()
+#
+# - Executes all preflight checks and collects results
+# - Displays a summary with pass/fail/warn counts
+# - On failure: reports to telemetry with "aborted" status and exits cleanly
+# - On success: brief pause (2s) then returns (caller shows next screen)
+# - Called from install_script() after header_info()
+# ------------------------------------------------------------------------------
+run_preflight() {
+  # Reset counters
+  PREFLIGHT_PASSED=0
+  PREFLIGHT_FAILED=0
+  PREFLIGHT_WARNINGS=0
+  PREFLIGHT_FAILURES=()
+  PREFLIGHT_EXIT_CODE=0
+
+  echo -e "${INFO}${BOLD}${DGN} Running pre-flight checks...${CL}"
+  echo ""
+
+  # --- Kernel checks ---
+  preflight_maxkeys
+
+  # --- Storage checks ---
+  preflight_storage_rootdir
+  preflight_storage_vztmpl
+  preflight_storage_space
+
+  # --- Network checks ---
+  preflight_network_bridge
+  preflight_dns_resolution
+
+  # --- Repository checks ---
+  preflight_repo_access
+
+  # --- Proxmox/Cluster checks ---
+  preflight_cluster_quorum
+  preflight_lxc_stack
+  preflight_container_id
+
+  # --- Template availability ---
+  preflight_template_connectivity
+  preflight_template_available
+
+  echo ""
+
+  # --- Summary ---
+  if [[ "$PREFLIGHT_FAILED" -gt 0 ]]; then
+    echo -e "${CROSS}${BOLD}${RD} Pre-flight failed: ${PREFLIGHT_FAILED} error(s), ${PREFLIGHT_WARNINGS} warning(s), ${PREFLIGHT_PASSED} passed${CL}"
+    echo ""
+
+    echo -e "${INFO}${BOLD}${DGN} Failure details:${CL}"
+    for failure in "${PREFLIGHT_FAILURES[@]}"; do
+      local code="${failure%%|*}"
+      local msg="${failure#*|}"
+      echo -e "  ${CROSS} [Exit ${code}] ${msg}"
+    done
+    echo ""
+    echo -e "${INFO} Please resolve the above issues before creating a container."
+    echo -e "${INFO} Documentation: ${BL}https://community-scripts.github.io/ProxmoxVED/${CL}"
+
+    # Report to telemetry (if consent was given)
+    post_preflight_to_api
+
+    exit "$PREFLIGHT_EXIT_CODE"
+  fi
+
+  # Success — brief pause so user can see results, then clear for next screen
+  if [[ "$PREFLIGHT_WARNINGS" -gt 0 ]]; then
+    echo -e "${CM}${BOLD}${GN} Pre-flight passed with ${PREFLIGHT_WARNINGS} warning(s) (${PREFLIGHT_PASSED} checks passed)${CL}"
+  else
+    echo -e "${CM}${BOLD}${GN} All pre-flight checks passed (${PREFLIGHT_PASSED}/${PREFLIGHT_PASSED})${CL}"
+  fi
+  sleep 2
 }
 
 # ==============================================================================
@@ -266,17 +674,29 @@ maxkeys_check() {
 #
 # - Returns current container IP depending on OS type
 # - Debian/Ubuntu: uses `hostname -I`
-# - Alpine: parses eth0 via `ip -4 addr`
+# - Alpine: parses eth0 via `ip -4 addr` or `ip -6 addr`
+# - Supports IPv6-only environments as fallback
 # - Returns "Unknown" if OS type cannot be determined
 # ------------------------------------------------------------------------------
 get_current_ip() {
+  CURRENT_IP=""
   if [ -f /etc/os-release ]; then
     # Check for Debian/Ubuntu (uses hostname -I)
     if grep -qE 'ID=debian|ID=ubuntu' /etc/os-release; then
-      CURRENT_IP=$(hostname -I | awk '{print $1}')
+      # Try IPv4 first
+      CURRENT_IP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+      # Fallback to IPv6 if no IPv4
+      if [[ -z "$CURRENT_IP" ]]; then
+        CURRENT_IP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E ':' | head -n1)
+      fi
     # Check for Alpine (uses ip command)
     elif grep -q 'ID=alpine' /etc/os-release; then
-      CURRENT_IP=$(ip -4 addr show eth0 | awk '/inet / {print $2}' | cut -d/ -f1 | head -n 1)
+      # Try IPv4 first
+      CURRENT_IP=$(ip -4 addr show eth0 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n 1)
+      # Fallback to IPv6 if no IPv4
+      if [[ -z "$CURRENT_IP" ]]; then
+        CURRENT_IP=$(ip -6 addr show eth0 scope global 2>/dev/null | awk '/inet6 / {print $2}' | cut -d/ -f1 | head -n 1)
+      fi
     else
       CURRENT_IP="Unknown"
     fi
@@ -301,6 +721,26 @@ update_motd_ip() {
     # Add the new IP address
     echo -e "${TAB}${NETWORK}${YW} IP Address: ${GN}${IP}${CL}" >>"$MOTD_FILE"
   fi
+
+  # Update dynamic LXC details profile if values changed (e.g., after OS upgrade)
+  # Only update if file exists and is from community-scripts
+  if [ -f "$PROFILE_FILE" ] && grep -q "community-scripts" "$PROFILE_FILE" 2>/dev/null; then
+    # Get current values
+    local current_os="$(grep ^NAME /etc/os-release | cut -d= -f2 | tr -d '"') - Version: $(grep ^VERSION_ID /etc/os-release | cut -d= -f2 | tr -d '"')"
+    local current_hostname="$(hostname)"
+    local current_ip="$(hostname -I | awk '{print $1}')"
+
+    # Update only if values actually changed
+    if ! grep -q "OS:.*$current_os" "$PROFILE_FILE" 2>/dev/null; then
+      sed -i "s|OS:.*|OS: \${GN}$current_os\${CL}\\\"|" "$PROFILE_FILE"
+    fi
+    if ! grep -q "Hostname:.*$current_hostname" "$PROFILE_FILE" 2>/dev/null; then
+      sed -i "s|Hostname:.*|Hostname: \${GN}$current_hostname\${CL}\\\"|" "$PROFILE_FILE"
+    fi
+    if ! grep -q "IP Address:.*$current_ip" "$PROFILE_FILE" 2>/dev/null; then
+      sed -i "s|IP Address:.*|IP Address: \${GN}$current_ip\${CL}\\\"|" "$PROFILE_FILE"
+    fi
+  fi
 }
 
 # ------------------------------------------------------------------------------
@@ -308,6 +748,7 @@ update_motd_ip() {
 #
 # - Installs SSH keys into container root account if SSH is enabled
 # - Uses pct push or direct input to authorized_keys
+# - Supports both SSH_KEYS_FILE (from advanced settings) and SSH_AUTHORIZED_KEY (from user defaults)
 # - Falls back to warning if no keys provided
 # ------------------------------------------------------------------------------
 install_ssh_keys_into_ct() {
@@ -315,6 +756,13 @@ install_ssh_keys_into_ct() {
 
   # Ensure SSH_KEYS_FILE is defined (may not be set if advanced_settings was skipped)
   : "${SSH_KEYS_FILE:=}"
+
+  # If SSH_KEYS_FILE doesn't exist but SSH_AUTHORIZED_KEY is set (from user defaults),
+  # create a temporary SSH_KEYS_FILE with the key
+  if [[ -z "$SSH_KEYS_FILE" || ! -s "$SSH_KEYS_FILE" ]] && [[ -n "${SSH_AUTHORIZED_KEY:-}" ]]; then
+    SSH_KEYS_FILE="$(mktemp)"
+    printf '%s\n' "$SSH_AUTHORIZED_KEY" >"$SSH_KEYS_FILE"
+  fi
 
   if [[ -n "$SSH_KEYS_FILE" && -s "$SSH_KEYS_FILE" ]]; then
     msg_info "Installing selected SSH keys into CT ${CTID}"
@@ -332,9 +780,56 @@ install_ssh_keys_into_ct() {
     return 0
   fi
 
-  # Fallback: nichts ausgewählt
+  # Fallback
   msg_warn "No SSH keys to install (skipping)."
   return 0
+}
+
+# ------------------------------------------------------------------------------
+# validate_container_id()
+#
+# - Validates if a container ID is available for use
+# - Checks if ID is already used by VM or LXC container
+# - Checks if ID is used in LVM logical volumes
+# - Returns 0 if ID is available, 1 if already in use
+# ------------------------------------------------------------------------------
+validate_container_id() {
+  local ctid="$1"
+
+  # Check if ID is numeric
+  if ! [[ "$ctid" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+
+  # Check if config file exists for VM or LXC
+  if [[ -f "/etc/pve/qemu-server/${ctid}.conf" ]] || [[ -f "/etc/pve/lxc/${ctid}.conf" ]]; then
+    return 1
+  fi
+
+  # Check if ID is used in LVM logical volumes
+  if lvs --noheadings -o lv_name 2>/dev/null | grep -qE "(^|[-_])${ctid}($|[-_])"; then
+    return 1
+  fi
+
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# get_valid_container_id()
+#
+# - Returns a valid, unused container ID
+# - If provided ID is valid, returns it
+# - Otherwise increments from suggested ID until a free one is found
+# - Calls validate_container_id() to check availability
+# ------------------------------------------------------------------------------
+get_valid_container_id() {
+  local suggested_id="${1:-$(pvesh get /cluster/nextid)}"
+
+  while ! validate_container_id "$suggested_id"; do
+    suggested_id=$((suggested_id + 1))
+  done
+
+  echo "$suggested_id"
 }
 
 # ------------------------------------------------------------------------------
@@ -935,8 +1430,6 @@ base_settings() {
   CORE_COUNT="${final_cpu}"
   RAM_SIZE="${final_ram}"
   VERBOSE=${var_verbose:-"${1:-no}"}
-
-  # Password sanitization - clean up dashes and format properly
   PW=""
   if [[ -n "${var_pw:-}" ]]; then
     local _pw_raw="${var_pw}"
@@ -1025,7 +1518,6 @@ base_settings() {
   ENABLE_NESTING=${var_nesting:-"1"}
   ENABLE_KEYCTL=${var_keyctl:-"0"}
   ENABLE_MKNOD=${var_mknod:-"0"}
-  MOUNT_FS=${var_mount_fs:-""}
   PROTECT_CT=${var_protection:-"no"}
   CT_TIMEZONE=${var_timezone:-"$timezone"}
   [[ "${CT_TIMEZONE:-}" == Etc/* ]] && CT_TIMEZONE="host" # pct doesn't accept Etc/* zones
@@ -1315,18 +1807,12 @@ var_fuse=no
 var_tun=no
 
 # Advanced Settings (Proxmox-official features)
-# var_nesting: Allow nesting (required for Docker/LXC in CT)
-var_nesting=1
-# var_keyctl: Allow keyctl() - needed for Docker (systemd-networkd workaround)
-var_keyctl=0
-# var_mknod: Allow device node creation (requires kernel 5.3+, experimental)
-var_mknod=0
-# var_mount_fs: Allow specific filesystems: nfs,fuse,ext4,etc (leave empty for defaults)
-var_mount_fs=
-# var_protection: Prevent accidental deletion of container
-var_protection=no
-# var_timezone: Container timezone (e.g. Europe/Berlin, leave empty for host timezone)
-var_timezone=
+var_nesting=1          # Allow nesting (required for Docker/LXC in CT)
+var_keyctl=0           # Allow keyctl() - needed for Docker (systemd-networkd workaround)
+var_mknod=0            # Allow device node creation (requires kernel 5.3+, experimental)
+var_mount_fs=          # Allow specific filesystems: nfs,fuse,ext4,etc (leave empty for defaults)
+var_protection=no      # Prevent accidental deletion of container
+var_timezone=          # Container timezone (e.g. Europe/Berlin, leave empty for host timezone)
 var_tags=community-script
 var_verbose=no
 
@@ -1638,7 +2124,7 @@ maybe_offer_save_app_defaults() {
 
   # 1) if no file → offer to create
   if [[ ! -f "$app_vars_path" ]]; then
-    if whiptail --backtitle "[dev] Proxmox VE Helper Scripts" \
+    if whiptail --backtitle "Proxmox VE Helper Scripts" \
       --yesno "Save these advanced settings as defaults for ${APP}?\n\nThis will create:\n${app_vars_path}" 12 72; then
       mkdir -p "$(dirname "$app_vars_path")"
       install -m 0644 "$new_tmp" "$app_vars_path"
@@ -1663,7 +2149,7 @@ maybe_offer_save_app_defaults() {
 
   while true; do
     local sel
-    sel="$(whiptail --backtitle "[dev] Proxmox VE Helper Scripts" \
+    sel="$(whiptail --backtitle "Proxmox VE Helper Scripts" \
       --title "APP DEFAULTS – ${APP}" \
       --menu "Differences detected. What do you want to do?" 20 78 10 \
       "Update Defaults" "Write new values to ${app_vars_file}" \
@@ -1684,7 +2170,7 @@ maybe_offer_save_app_defaults() {
       break
       ;;
     "View Diff")
-      whiptail --backtitle "[dev] Proxmox VE Helper Scripts" \
+      whiptail --backtitle "Proxmox VE Helper Scripts" \
         --title "Diff – ${APP}" \
         --scrolltext --textbox "$diff_tmp" 25 100
       ;;
@@ -1709,6 +2195,13 @@ ensure_storage_selection_for_vars_file() {
   if [[ -n "$tpl" && -n "$ct" ]]; then
     TEMPLATE_STORAGE="$tpl"
     CONTAINER_STORAGE="$ct"
+
+    # Validate storage space for loaded container storage
+    if [[ -n "${DISK_SIZE:-}" ]]; then
+      validate_storage_space "$ct" "$DISK_SIZE" "yes"
+      # Continue even if validation fails - user was warned
+    fi
+
     return 0
   fi
 
@@ -1789,7 +2282,7 @@ advanced_settings() {
   elif [ -f /etc/timezone ]; then
     _host_timezone=$(cat /etc/timezone 2>/dev/null || echo "")
   fi
-  # pct doesn't accept Etc/* zones - map to 'host' instead
+  # Map Etc/* timezones to "host" (pct doesn't accept Etc/* zones)
   [[ "${_host_timezone:-}" == Etc/* ]] && _host_timezone="host"
   local _ct_timezone="${var_timezone:-$_host_timezone}"
   [[ "${_ct_timezone:-}" == Etc/* ]] && _ct_timezone="host"
@@ -1886,32 +2379,36 @@ advanced_settings() {
         elif [[ "$PW1" == *" "* ]]; then
           whiptail --msgbox "Password cannot contain spaces." 8 58
         else
-          # Clean up leading dashes from password
           local _pw1_clean="$PW1"
           while [[ "$_pw1_clean" == -* ]]; do
             _pw1_clean="${_pw1_clean#-}"
           done
           if [[ -z "$_pw1_clean" ]]; then
             whiptail --msgbox "Password cannot be only '-' characters." 8 58
+            continue
           elif ((${#_pw1_clean} < 5)); then
             whiptail --msgbox "Password must be at least 5 characters (after removing leading '-')." 8 70
-          else
-            # Verify password
-            if PW2=$(whiptail --backtitle "Proxmox VE Helper Scripts [Step $STEP/$MAX_STEP]" \
-              --title "PASSWORD VERIFICATION" \
-              --ok-button "Confirm" --cancel-button "Back" \
-              --passwordbox "\nVerify Root Password" 10 58 \
-              3>&1 1>&2 2>&3); then
-              if [[ "$PW1" == "$PW2" ]]; then
-                _pw="--password $_pw1_clean"
-                _pw_display="********"
-                ((STEP++))
-              else
-                whiptail --msgbox "Passwords do not match. Please try again." 8 58
-              fi
+            continue
+          fi
+          # Verify password
+          if PW2=$(whiptail --backtitle "Proxmox VE Helper Scripts [Step $STEP/$MAX_STEP]" \
+            --title "PASSWORD VERIFICATION" \
+            --ok-button "Confirm" --cancel-button "Back" \
+            --passwordbox "\nVerify Root Password" 10 58 \
+            3>&1 1>&2 2>&3); then
+            local _pw2_clean="$PW2"
+            while [[ "$_pw2_clean" == -* ]]; do
+              _pw2_clean="${_pw2_clean#-}"
+            done
+            if [[ "$_pw1_clean" == "$_pw2_clean" ]]; then
+              _pw="--password $_pw1_clean"
+              _pw_display="********"
+              ((STEP++))
             else
-              ((STEP--))
+              whiptail --msgbox "Passwords do not match. Please try again." 8 58
             fi
+          else
+            ((STEP--))
           fi
         fi
       else
@@ -1929,22 +2426,25 @@ advanced_settings() {
         --inputbox "\nSet Container ID" 10 58 "$_ct_id" \
         3>&1 1>&2 2>&3); then
         local input_id="${result:-$NEXTID}"
-        # Validate container ID is numeric
+
+        # Validate that ID is numeric
         if ! [[ "$input_id" =~ ^[0-9]+$ ]]; then
-          whiptail --msgbox "Container ID must be numeric." 8 58
+          whiptail --backtitle "Proxmox VE Helper Scripts" --title "Invalid ID" --msgbox "Container ID must be numeric." 8 58
           continue
         fi
-        # Validate container ID is available
+
+        # Check if ID is already in use
         if ! validate_container_id "$input_id"; then
-          if whiptail --yesno "Container/VM ID $input_id is already in use.\n\nWould you like to use the next available ID: $(get_valid_container_id "$input_id")?" 10 58; then
+          if whiptail --backtitle "Proxmox VE Helper Scripts" --title "ID Already In Use" \
+            --yesno "Container/VM ID $input_id is already in use.\n\nWould you like to use the next available ID ($(get_valid_container_id "$input_id"))?" 10 58; then
             _ct_id=$(get_valid_container_id "$input_id")
-            ((STEP++))
+          else
+            continue
           fi
-          # else stay on this step
         else
           _ct_id="$input_id"
-          ((STEP++))
         fi
+        ((STEP++))
       else
         ((STEP--))
       fi
@@ -1957,15 +2457,16 @@ advanced_settings() {
       if result=$(whiptail --backtitle "Proxmox VE Helper Scripts [Step $STEP/$MAX_STEP]" \
         --title "HOSTNAME" \
         --ok-button "Next" --cancel-button "Back" \
-        --inputbox "\nSet Hostname (lowercase, alphanumeric, hyphens only)" 10 58 "$_hostname" \
+        --inputbox "\nSet Hostname (or FQDN, e.g. host.example.com)" 10 58 "$_hostname" \
         3>&1 1>&2 2>&3); then
         local hn_test="${result:-$NSAPP}"
         hn_test=$(echo "${hn_test,,}" | tr -d ' ')
-        if [[ "$hn_test" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
+
+        if validate_hostname "$hn_test"; then
           _hostname="$hn_test"
           ((STEP++))
         else
-          whiptail --msgbox "Invalid hostname: '$hn_test'\n\nOnly lowercase letters, digits and hyphens are allowed." 10 58
+          whiptail --msgbox "Invalid hostname: '$hn_test'\n\nRules:\n- Only lowercase letters, digits, dots and hyphens\n- Labels separated by dots (max 63 chars each)\n- No leading/trailing hyphens or dots\n- No consecutive dots\n- Total max 253 characters" 14 60
         fi
       else
         ((STEP--))
@@ -2040,8 +2541,14 @@ advanced_settings() {
     # ═══════════════════════════════════════════════════════════════════════════
     8)
       if [[ ${#BRIDGE_MENU_OPTIONS[@]} -eq 0 ]]; then
-        _bridge="vmbr0"
-        ((STEP++))
+        # Validate default bridge exists
+        if validate_bridge "vmbr0"; then
+          _bridge="vmbr0"
+          ((STEP++))
+        else
+          whiptail --msgbox "Default bridge 'vmbr0' not found!\n\nPlease configure a network bridge in Proxmox first." 10 58
+          exit 1
+        fi
       else
         if result=$(whiptail --backtitle "Proxmox VE Helper Scripts [Step $STEP/$MAX_STEP]" \
           --title "NETWORK BRIDGE" \
@@ -2049,8 +2556,13 @@ advanced_settings() {
           --menu "\nSelect network bridge:" 16 58 6 \
           "${BRIDGE_MENU_OPTIONS[@]}" \
           3>&1 1>&2 2>&3); then
-          _bridge="${result:-vmbr0}"
-          ((STEP++))
+          local bridge_test="${result:-vmbr0}"
+          if validate_bridge "$bridge_test"; then
+            _bridge="$bridge_test"
+            ((STEP++))
+          else
+            whiptail --msgbox "Bridge '$bridge_test' is not available or not active." 8 58
+          fi
         else
           ((STEP--))
         fi
@@ -2064,9 +2576,10 @@ advanced_settings() {
       if result=$(whiptail --backtitle "Proxmox VE Helper Scripts [Step $STEP/$MAX_STEP]" \
         --title "IPv4 CONFIGURATION" \
         --ok-button "Next" --cancel-button "Back" \
-        --menu "\nSelect IPv4 Address Assignment:" 14 60 2 \
+        --menu "\nSelect IPv4 Address Assignment:" 16 65 3 \
         "dhcp" "Automatic (DHCP, recommended)" \
         "static" "Static (manual entry)" \
+        "range" "IP Range Scan (find first free IP)" \
         3>&1 1>&2 2>&3); then
 
         if [[ "$result" == "static" ]]; then
@@ -2077,7 +2590,7 @@ advanced_settings() {
             --ok-button "Next" --cancel-button "Back" \
             --inputbox "\nEnter Static IPv4 CIDR Address\n(e.g. 192.168.1.100/24)" 12 58 "" \
             3>&1 1>&2 2>&3); then
-            if [[ "$static_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$ ]]; then
+            if validate_ip_address "$static_ip"; then
               # Get gateway
               local gateway_ip
               if gateway_ip=$(whiptail --backtitle "Proxmox VE Helper Scripts [Step $STEP/$MAX_STEP]" \
@@ -2085,16 +2598,62 @@ advanced_settings() {
                 --ok-button "Next" --cancel-button "Back" \
                 --inputbox "\nEnter Gateway IP address" 10 58 "" \
                 3>&1 1>&2 2>&3); then
-                if [[ "$gateway_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-                  _net="$static_ip"
-                  _gate=",gw=$gateway_ip"
-                  ((STEP++))
+                if validate_gateway_ip "$gateway_ip"; then
+                  # Validate gateway is in same subnet
+                  if validate_gateway_in_subnet "$static_ip" "$gateway_ip"; then
+                    _net="$static_ip"
+                    _gate=",gw=$gateway_ip"
+                    ((STEP++))
+                  else
+                    whiptail --msgbox "Gateway is not in the same subnet as the static IP.\n\nStatic IP: $static_ip\nGateway: $gateway_ip" 10 58
+                  fi
                 else
-                  whiptail --msgbox "Invalid Gateway IP format." 8 58
+                  whiptail --msgbox "Invalid Gateway IP format.\n\nEach octet must be 0-255.\nExample: 192.168.1.1" 10 58
                 fi
               fi
             else
-              whiptail --msgbox "Invalid IPv4 CIDR format.\nExample: 192.168.1.100/24" 8 58
+              whiptail --msgbox "Invalid IPv4 CIDR format.\n\nEach octet must be 0-255.\nCIDR must be 1-32.\nExample: 192.168.1.100/24" 12 58
+            fi
+          fi
+        elif [[ "$result" == "range" ]]; then
+          # IP Range Scan
+          local ip_range
+          if ip_range=$(whiptail --backtitle "Proxmox VE Helper Scripts [Step $STEP/$MAX_STEP]" \
+            --title "IP RANGE SCAN" \
+            --ok-button "Scan" --cancel-button "Back" \
+            --inputbox "\nEnter IP range to scan for free address\n(e.g. 192.168.1.100/24-192.168.1.200/24)" 12 65 "" \
+            3>&1 1>&2 2>&3); then
+            if is_ip_range "$ip_range"; then
+              # Exit whiptail screen temporarily to show scan progress
+              clear
+              header_info
+              echo -e "${INFO}${BOLD}${DGN}Scanning IP range for free address...${CL}\n"
+              if resolve_ip_from_range "$ip_range"; then
+                # Get gateway
+                local gateway_ip
+                if gateway_ip=$(whiptail --backtitle "Proxmox VE Helper Scripts [Step $STEP/$MAX_STEP]" \
+                  --title "GATEWAY IP" \
+                  --ok-button "Next" --cancel-button "Back" \
+                  --inputbox "\nFound free IP: $NET_RESOLVED\n\nEnter Gateway IP address" 12 58 "" \
+                  3>&1 1>&2 2>&3); then
+                  if validate_gateway_ip "$gateway_ip"; then
+                    # Validate gateway is in same subnet
+                    if validate_gateway_in_subnet "$NET_RESOLVED" "$gateway_ip"; then
+                      _net="$NET_RESOLVED"
+                      _gate=",gw=$gateway_ip"
+                      ((STEP++))
+                    else
+                      whiptail --msgbox "Gateway is not in the same subnet as the IP.\n\nIP: $NET_RESOLVED\nGateway: $gateway_ip" 10 58
+                    fi
+                  else
+                    whiptail --msgbox "Invalid Gateway IP format.\n\nEach octet must be 0-255.\nExample: 192.168.1.1" 10 58
+                  fi
+                fi
+              else
+                whiptail --msgbox "No free IP found in the specified range.\nAll IPs responded to ping." 10 58
+              fi
+            else
+              whiptail --msgbox "Invalid IP range format.\n\nExample: 192.168.1.100/24-192.168.1.200/24" 10 58
             fi
           fi
         else
@@ -2130,16 +2689,33 @@ advanced_settings() {
             --title "STATIC IPv6 ADDRESS" \
             --inputbox "\nEnter IPv6 CIDR address\n(e.g. 2001:db8::1/64)" 12 58 "" \
             3>&1 1>&2 2>&3); then
-            if [[ "$ipv6_addr" =~ ^([0-9a-fA-F:]+:+)+[0-9a-fA-F]+(/[0-9]{1,3})$ ]]; then
+            if validate_ipv6_address "$ipv6_addr"; then
               _ipv6_addr="$ipv6_addr"
-              # Optional gateway
-              _ipv6_gate=$(whiptail --backtitle "Proxmox VE Helper Scripts" \
-                --title "IPv6 GATEWAY" \
-                --inputbox "\nEnter IPv6 gateway (optional, leave blank for none)" 10 58 "" \
-                3>&1 1>&2 2>&3) || true
-              ((STEP++))
+              # Optional gateway - loop until valid or empty
+              local ipv6_gw_valid=false
+              while [[ "$ipv6_gw_valid" == "false" ]]; do
+                local ipv6_gw
+                ipv6_gw=$(whiptail --backtitle "Proxmox VE Helper Scripts" \
+                  --title "IPv6 GATEWAY" \
+                  --inputbox "\nEnter IPv6 gateway (optional, leave blank for none)" 10 58 "" \
+                  3>&1 1>&2 2>&3) || true
+                # Validate gateway if provided
+                if [[ -n "$ipv6_gw" ]]; then
+                  if validate_ipv6_address "$ipv6_gw"; then
+                    _ipv6_gate="$ipv6_gw"
+                    ipv6_gw_valid=true
+                    ((STEP++))
+                  else
+                    whiptail --msgbox "Invalid IPv6 gateway format.\n\nExample: 2001:db8::1" 8 58
+                  fi
+                else
+                  _ipv6_gate=""
+                  ipv6_gw_valid=true
+                  ((STEP++))
+                fi
+              done
             else
-              whiptail --msgbox "Invalid IPv6 CIDR format." 8 58
+              whiptail --msgbox "Invalid IPv6 CIDR format.\n\nExample: 2001:db8::1/64\nCIDR must be 1-128." 10 58
             fi
           fi
           ;;
@@ -2148,11 +2724,7 @@ advanced_settings() {
           _ipv6_gate=""
           ((STEP++))
           ;;
-        disable)
-          _ipv6_addr=""
-          _ipv6_gate=""
-          ((STEP++))
-          ;;
+
         none)
           _ipv6_addr="none"
           _ipv6_gate=""
@@ -2176,10 +2748,14 @@ advanced_settings() {
       if result=$(whiptail --backtitle "Proxmox VE Helper Scripts [Step $STEP/$MAX_STEP]" \
         --title "MTU SIZE" \
         --ok-button "Next" --cancel-button "Back" \
-        --inputbox "\nSet Interface MTU Size\n(leave blank for default 1500)" 12 58 "" \
+        --inputbox "\nSet Interface MTU Size\n(leave blank for default 1500, common values: 1500, 9000)" 12 62 "" \
         3>&1 1>&2 2>&3); then
-        _mtu="$result"
-        ((STEP++))
+        if validate_mtu "$result"; then
+          _mtu="$result"
+          ((STEP++))
+        else
+          whiptail --msgbox "Invalid MTU size.\n\nMTU must be between 576 and 65535.\nCommon values: 1500 (default), 9000 (jumbo frames)" 10 58
+        fi
       else
         ((STEP--))
       fi
@@ -2224,10 +2800,14 @@ advanced_settings() {
       if result=$(whiptail --backtitle "Proxmox VE Helper Scripts [Step $STEP/$MAX_STEP]" \
         --title "MAC ADDRESS" \
         --ok-button "Next" --cancel-button "Back" \
-        --inputbox "\nSet MAC Address\n(leave blank for auto-generated)" 12 58 "" \
+        --inputbox "\nSet MAC Address\n(leave blank for auto-generated, format: XX:XX:XX:XX:XX:XX)" 12 62 "" \
         3>&1 1>&2 2>&3); then
-        _mac="$result"
-        ((STEP++))
+        if validate_mac_address "$result"; then
+          _mac="$result"
+          ((STEP++))
+        else
+          whiptail --msgbox "Invalid MAC address format.\n\nRequired format: XX:XX:XX:XX:XX:XX\nExample: 02:00:00:00:00:01" 10 58
+        fi
       else
         ((STEP--))
       fi
@@ -2240,10 +2820,14 @@ advanced_settings() {
       if result=$(whiptail --backtitle "Proxmox VE Helper Scripts [Step $STEP/$MAX_STEP]" \
         --title "VLAN TAG" \
         --ok-button "Next" --cancel-button "Back" \
-        --inputbox "\nSet VLAN Tag\n(leave blank for no VLAN)" 12 58 "" \
+        --inputbox "\nSet VLAN Tag (1-4094)\n(leave blank for no VLAN)" 12 58 "" \
         3>&1 1>&2 2>&3); then
-        _vlan="$result"
-        ((STEP++))
+        if validate_vlan_tag "$result"; then
+          _vlan="$result"
+          ((STEP++))
+        else
+          whiptail --msgbox "Invalid VLAN tag.\n\nVLAN must be a number between 1 and 4094." 8 58
+        fi
       else
         ((STEP--))
       fi
@@ -2256,11 +2840,16 @@ advanced_settings() {
       if result=$(whiptail --backtitle "Proxmox VE Helper Scripts [Step $STEP/$MAX_STEP]" \
         --title "CONTAINER TAGS" \
         --ok-button "Next" --cancel-button "Back" \
-        --inputbox "\nSet Custom Tags (semicolon-separated)\n(remove all for no tags)" 12 58 "$_tags" \
+        --inputbox "\nSet Custom Tags (semicolon-separated)\n(alphanumeric, hyphens, underscores only)" 12 58 "$_tags" \
         3>&1 1>&2 2>&3); then
-        _tags="${result:-;}"
-        _tags=$(echo "$_tags" | tr -d '[:space:]')
-        ((STEP++))
+        local tags_test="${result:-}"
+        tags_test=$(echo "$tags_test" | tr -d '[:space:]')
+        if validate_tags "$tags_test"; then
+          _tags="$tags_test"
+          ((STEP++))
+        else
+          whiptail --msgbox "Invalid tag format.\n\nTags can only contain:\n- Letters (a-z, A-Z)\n- Numbers (0-9)\n- Hyphens (-)\n- Underscores (_)\n- Semicolons (;) as separator" 14 58
+        fi
       else
         ((STEP--))
       fi
@@ -2439,8 +3028,14 @@ advanced_settings() {
         --ok-button "Next" --cancel-button "Back" \
         --inputbox "\nSet container timezone.\n\nExamples: Europe/Berlin, America/New_York, Asia/Tokyo\n\nHost timezone: ${_host_timezone:-unknown}\n\nLeave empty to inherit from host." 16 62 "$_ct_timezone" \
         3>&1 1>&2 2>&3); then
-        _ct_timezone="$result"
-        ((STEP++))
+        local tz_test="$result"
+        [[ "${tz_test:-}" == Etc/* ]] && tz_test="host" # pct doesn't accept Etc/* zones
+        if validate_timezone "$tz_test"; then
+          _ct_timezone="$tz_test"
+          ((STEP++))
+        else
+          whiptail --msgbox "Invalid timezone: '$result'\n\nTimezone must exist in /usr/share/zoneinfo/\n\nExamples:\n- Europe/Berlin\n- America/New_York\n- Asia/Tokyo\n- UTC" 14 58
+        fi
       else
         ((STEP--))
       fi
@@ -2640,10 +3235,9 @@ Advanced:
   export UDHCPC_FIX
   export SSH_KEYS_FILE
 
-  # Exit alternate screen buffer BEFORE displaying summary
-  # so the summary is visible in the main terminal
+  # Exit alternate screen buffer before showing summary (so output remains visible)
   tput rmcup 2>/dev/null || true
-  trap - RETURN # Remove the trap since we already called rmcup
+  trap - RETURN
 
   # Display final summary
   echo -e "\n${INFO}${BOLD}${DGN}PVE Version ${PVEVERSION} (Kernel: ${KERNEL_VERSION})${CL}"
@@ -2658,16 +3252,36 @@ Advanced:
   echo -e "${BRIDGE}${BOLD}${DGN}Bridge: ${BGN}$BRG${CL}"
   echo -e "${NETWORK}${BOLD}${DGN}IPv4: ${BGN}$NET${CL}"
   echo -e "${NETWORK}${BOLD}${DGN}IPv6: ${BGN}$IPV6_METHOD${CL}"
-  echo -e "${FUSE}${BOLD}${DGN}FUSE Support: ${BGN}$ENABLE_FUSE${CL}"
-  [[ "$ENABLE_TUN" == "yes" ]] && echo -e "${NETWORK}${BOLD}${DGN}TUN/TAP Support: ${BGN}$ENABLE_TUN${CL}"
-  echo -e "${CONTAINERTYPE}${BOLD}${DGN}Nesting: ${BGN}$([ "$ENABLE_NESTING" == "1" ] && echo "Enabled" || echo "Disabled")${CL}"
-  [[ "$ENABLE_KEYCTL" == "1" ]] && echo -e "${CONTAINERTYPE}${BOLD}${DGN}Keyctl: ${BGN}Enabled${CL}"
-  echo -e "${GPU}${BOLD}${DGN}GPU Passthrough: ${BGN}$ENABLE_GPU${CL}"
-  [[ "$PROTECT_CT" == "yes" || "$PROTECT_CT" == "1" ]] && echo -e "${CONTAINERTYPE}${BOLD}${DGN}Protection: ${BGN}Enabled${CL}"
-  [[ -n "$CT_TIMEZONE" ]] && echo -e "${CONTAINERTYPE}${BOLD}${DGN}Timezone: ${BGN}$CT_TIMEZONE${CL}"
-  [[ "$APT_CACHER" == "yes" ]] && echo -e "${CONTAINERTYPE}${BOLD}${DGN}APT Cacher: ${BGN}$APT_CACHER_IP${CL}"
+  echo -e "${FUSE}${BOLD}${DGN}FUSE Support: ${BGN}${ENABLE_FUSE:-no}${CL}"
+  [[ "${ENABLE_TUN:-no}" == "yes" ]] && echo -e "${NETWORK}${BOLD}${DGN}TUN/TAP Support: ${BGN}$ENABLE_TUN${CL}"
+  echo -e "${CONTAINERTYPE}${BOLD}${DGN}Nesting: ${BGN}$([ "${ENABLE_NESTING:-1}" == "1" ] && echo "Enabled" || echo "Disabled")${CL}"
+  [[ "${ENABLE_KEYCTL:-0}" == "1" ]] && echo -e "${CONTAINERTYPE}${BOLD}${DGN}Keyctl: ${BGN}Enabled${CL}"
+  echo -e "${GPU}${BOLD}${DGN}GPU Passthrough: ${BGN}${ENABLE_GPU:-no}${CL}"
+  [[ "${PROTECT_CT:-no}" == "yes" || "${PROTECT_CT:-no}" == "1" ]] && echo -e "${CONTAINERTYPE}${BOLD}${DGN}Protection: ${BGN}Enabled${CL}"
+  [[ -n "${CT_TIMEZONE:-}" ]] && echo -e "${INFO}${BOLD}${DGN}Timezone: ${BGN}$CT_TIMEZONE${CL}"
+  [[ "$APT_CACHER" == "yes" ]] && echo -e "${INFO}${BOLD}${DGN}APT Cacher: ${BGN}$APT_CACHER_IP${CL}"
   echo -e "${SEARCH}${BOLD}${DGN}Verbose Mode: ${BGN}$VERBOSE${CL}"
   echo -e "${CREATING}${BOLD}${RD}Creating a ${APP} LXC using the above advanced settings${CL}"
+
+  # Log settings to file
+  log_section "CONTAINER SETTINGS (ADVANCED) - ${APP}"
+  log_msg "Application: ${APP}"
+  log_msg "PVE Version: ${PVEVERSION} (Kernel: ${KERNEL_VERSION})"
+  log_msg "Operating System: $var_os ($var_version)"
+  log_msg "Container Type: $([ "$CT_TYPE" == "1" ] && echo "Unprivileged" || echo "Privileged")"
+  log_msg "Container ID: $CT_ID"
+  log_msg "Hostname: $HN"
+  log_msg "Disk Size: ${DISK_SIZE} GB"
+  log_msg "CPU Cores: $CORE_COUNT"
+  log_msg "RAM Size: ${RAM_SIZE} MiB"
+  log_msg "Bridge: $BRG"
+  log_msg "IPv4: $NET"
+  log_msg "IPv6: $IPV6_METHOD"
+  log_msg "FUSE Support: ${ENABLE_FUSE:-no}"
+  log_msg "Nesting: $([ "${ENABLE_NESTING:-1}" == "1" ] && echo "Enabled" || echo "Disabled")"
+  log_msg "GPU Passthrough: ${ENABLE_GPU:-no}"
+  log_msg "Verbose Mode: $VERBOSE"
+  log_msg "Session ID: ${SESSION_ID}"
 }
 
 # ==============================================================================
@@ -2690,14 +3304,14 @@ diagnostics_check() {
   fi
 
   if ! [ -f "/usr/local/community-scripts/diagnostics" ]; then
-    if (whiptail --backtitle "[dev] Proxmox VE Helper Scripts" --title "DIAGNOSTICS" --yesno "Send Diagnostics of LXC Installation?\n\n(This only transmits data without user data, just RAM, CPU, LXC name, ...)" 10 58); then
+    if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "DIAGNOSTICS" --yesno "Send Diagnostics of LXC Installation?\n\n(This only transmits data without user data, just RAM, CPU, LXC name, ...)" 10 58); then
       cat <<EOF >/usr/local/community-scripts/diagnostics
 DIAGNOSTICS=yes
 
 #This file is used to store the diagnostics settings for the Community-Scripts API.
-#https://github.com/community-scripts/ProxmoxVED/discussions/1836
+#https://git.community-scripts.org/community-scripts/ProxmoxVED/discussions/1836
 #Your diagnostics will be sent to the Community-Scripts API for troubleshooting/statistical purposes.
-#You can review the data at https://community-scripts.github.io/ProxmoxVE/data
+#You can review the data at https://community-scripts.github.io/ProxmoxVED/data
 #If you do not wish to send diagnostics, please set the variable 'DIAGNOSTICS' to "no" in /usr/local/community-scripts/diagnostics, or use the menue.
 #This will disable the diagnostics feature.
 #To send diagnostics, set the variable 'DIAGNOSTICS' to "yes" in /usr/local/community-scripts/diagnostics, or use the menue.
@@ -2720,9 +3334,9 @@ EOF
 DIAGNOSTICS=no
 
 #This file is used to store the diagnostics settings for the Community-Scripts API.
-#https://github.com/community-scripts/ProxmoxVED/discussions/1836
+#https://git.community-scripts.org/community-scripts/ProxmoxVED/discussions/1836
 #Your diagnostics will be sent to the Community-Scripts API for troubleshooting/statistical purposes.
-#You can review the data at https://community-scripts.github.io/ProxmoxVE/data
+#You can review the data at https://community-scripts.github.io/ProxmoxVED/data
 #If you do not wish to send diagnostics, please set the variable 'DIAGNOSTICS' to "no" in /usr/local/community-scripts/diagnostics, or use the menue.
 #This will disable the diagnostics feature.
 #To send diagnostics, set the variable 'DIAGNOSTICS' to "yes" in /usr/local/community-scripts/diagnostics, or use the menue.
@@ -2747,9 +3361,68 @@ EOF
   fi
 }
 
+dev_mode_menu() {
+  local motd=OFF keep=OFF trace=OFF pause=OFF breakpoint=OFF logs=OFF dryrun=OFF verbose=OFF
+
+  IFS=',' read -r -a _modes <<<"$dev_mode"
+  for m in "${_modes[@]}"; do
+    case "$m" in
+    motd) motd=ON ;;
+    keep) keep=ON ;;
+    trace) trace=ON ;;
+    pause) pause=ON ;;
+    breakpoint) breakpoint=ON ;;
+    logs) logs=ON ;;
+    dryrun) dryrun=ON ;;
+    esac
+  done
+
+  [[ "$var_verbose" == "yes" ]] && verbose=ON
+
+  local selection
+  selection=$(whiptail --backtitle "Proxmox VE Helper Scripts" \
+    --title "DEV MODE" \
+    --checklist "Choose one or more Options" 16 51 10 \
+    "motd" "Early SSH/MOTD Setup" "$motd" \
+    "keep" "Preserve Container on Failure" "$keep" \
+    "trace" "Bash Command Tracing" "$trace" \
+    "pause" "Step-by-Step Execution" "$pause" \
+    "breakpoint" "Interactive Shell on Error" "$breakpoint" \
+    "logs" "Persistent Logging" "$logs" \
+    "dryrun" "Simulation Mode" "$dryrun" \
+    "verbose" "Verbose logging" "$verbose" \
+    3>&1 1>&2 2>&3) || exit_script
+
+  dev_mode=""
+  var_verbose="no"
+  local modes_out=()
+
+  for tag in $selection; do
+    tag="${tag%\"}"
+    tag="${tag#\"}"
+    if [[ "$tag" == "verbose" ]]; then
+      var_verbose="yes"
+    else
+      modes_out+=("$tag")
+    fi
+  done
+
+  dev_mode=$(
+    IFS=,
+    echo "${modes_out[*]}"
+  )
+  unset DEV_MODE_MOTD DEV_MODE_KEEP DEV_MODE_TRACE DEV_MODE_PAUSE DEV_MODE_BREAKPOINT DEV_MODE_LOGS DEV_MODE_DRYRUN
+  parse_dev_mode
+  if [[ "${DEV_MODE_LOGS:-false}" == "true" ]]; then
+    mkdir -p /var/log/community-scripts
+    BUILD_LOG="/var/log/community-scripts/create-lxc-${SESSION_ID}-$(date +%Y%m%d_%H%M%S).log"
+    combined_log="/var/log/community-scripts/install-${SESSION_ID}-combined-$(date +%Y%m%d_%H%M%S).log"
+  fi
+}
+
 diagnostics_menu() {
   if [ "${DIAGNOSTICS:-no}" = "yes" ]; then
-    if whiptail --backtitle "[dev] Proxmox VE Helper Scripts" \
+    if whiptail --backtitle "Proxmox VE Helper Scripts" \
       --title "DIAGNOSTIC SETTINGS" \
       --yesno "Send Diagnostics?\n\nCurrent: ${DIAGNOSTICS}" 10 58 \
       --yes-button "No" --no-button "Back"; then
@@ -2758,7 +3431,7 @@ diagnostics_menu() {
       whiptail --msgbox "Diagnostics set to ${DIAGNOSTICS}." 8 58
     fi
   else
-    if whiptail --backtitle "[dev] Proxmox VE Helper Scripts" \
+    if whiptail --backtitle "Proxmox VE Helper Scripts" \
       --title "DIAGNOSTIC SETTINGS" \
       --yesno "Send Diagnostics?\n\nCurrent: ${DIAGNOSTICS}" 10 58 \
       --yes-button "Yes" --no-button "Back"; then
@@ -2788,21 +3461,38 @@ echo_default() {
   echo -e "${DISKSIZE}${BOLD}${DGN}Disk Size: ${BGN}${DISK_SIZE} GB${CL}"
   echo -e "${CPUCORE}${BOLD}${DGN}CPU Cores: ${BGN}${CORE_COUNT}${CL}"
   echo -e "${RAMSIZE}${BOLD}${DGN}RAM Size: ${BGN}${RAM_SIZE} MiB${CL}"
-  if [ "${var_gpu:-no}" == "yes" ]; then
-    echo -e "🎮${BOLD}${DGN} GPU Passthrough: ${BGN}Enabled${CL}"
+  if [[ "$(dpkg --print-architecture)" == "arm64" ]]; then
+    echo -e "${INFO}${BOLD}${DGN}Architecture: ${BGN}arm64${CL}"
+  fi
+  if [[ -n "${var_gpu:-}" && "${var_gpu}" == "yes" ]]; then
+    echo -e "${GPU}${BOLD}${DGN}GPU Passthrough: ${BGN}Enabled${CL}"
   fi
   if [ "$VERBOSE" == "yes" ]; then
     echo -e "${SEARCH}${BOLD}${DGN}Verbose Mode: ${BGN}Enabled${CL}"
   fi
   echo -e "${CREATING}${BOLD}${BL}Creating a ${APP} LXC using the above default settings${CL}"
   echo -e "  "
+
+  # Log settings to file
+  log_section "CONTAINER SETTINGS - ${APP}"
+  log_msg "Application: ${APP}"
+  log_msg "PVE Version: ${PVEVERSION} (Kernel: ${KERNEL_VERSION})"
+  log_msg "Container ID: ${CT_ID}"
+  log_msg "Operating System: $var_os ($var_version)"
+  log_msg "Container Type: $CT_TYPE_DESC"
+  log_msg "Disk Size: ${DISK_SIZE} GB"
+  log_msg "CPU Cores: ${CORE_COUNT}"
+  log_msg "RAM Size: ${RAM_SIZE} MiB"
+  [[ -n "${var_gpu:-}" && "${var_gpu}" == "yes" ]] && log_msg "GPU Passthrough: Enabled"
+  [[ "$VERBOSE" == "yes" ]] && log_msg "Verbose Mode: Enabled"
+  log_msg "Session ID: ${SESSION_ID}"
 }
 
 # ------------------------------------------------------------------------------
 # install_script()
 #
 # - Main entrypoint for installation mode
-# - Runs safety checks (pve_check, root_check, maxkeys_check, diagnostics_check)
+# - Runs safety checks (pve_check, root_check, diagnostics_check, run_preflight)
 # - Builds interactive menu (Default, Verbose, Advanced, My Defaults, App Defaults, Diagnostics, Storage, Exit)
 # - Applies chosen settings and triggers container build
 # ------------------------------------------------------------------------------
@@ -2810,9 +3500,10 @@ install_script() {
   pve_check
   shell_check
   root_check
+  ensure_whiptail
   arch_check
+  arm64_notice
   ssh_check
-  maxkeys_check
   diagnostics_check
 
   if systemctl is-active -q ping-instances.service; then
@@ -2830,11 +3521,11 @@ install_script() {
   else
     timezone="UTC"
   fi
-  # pct doesn't accept Etc/* zones - map to 'host' instead
-  [[ "${timezone:-}" == Etc/* ]] && timezone="host"
+  [[ "${timezone:-}" == Etc/* ]] && timezone="host" # pct doesn't accept Etc/* zones
 
-  # Show APP Header
+  # Show APP Header + run preflight checks
   header_info
+  run_preflight
 
   # --- Support CLI argument as direct preset (default, advanced, …) ---
   CHOICE="${mode:-${1:-}}"
@@ -2895,7 +3586,6 @@ install_script() {
     2 | advanced | ADVANCED)
       header_info
       echo -e "${ADVANCED}${BOLD}${RD}Using Advanced Install on node $PVEHOST_NAME${CL}"
-      echo -e "${INFO}${BOLD}${DGN}PVE Version ${PVEVERSION} (Kernel: ${KERNEL_VERSION})${CL}"
       METHOD="advanced"
       base_settings
       advanced_settings
@@ -2916,8 +3606,8 @@ install_script() {
         header_info
         echo -e "${DEFAULT}${BOLD}${BL}Using App Defaults for ${APP} on node $PVEHOST_NAME${CL}"
         METHOD="appdefaults"
+        load_vars_file "$(get_app_defaults_path)" "yes" # Force override script defaults
         base_settings
-        load_vars_file "$(get_app_defaults_path)"
         echo_default
         defaults_target="$(get_app_defaults_path)"
         break
@@ -2931,6 +3621,15 @@ install_script() {
       # After settings menu, show main menu again
       header_info
       CHOICE=""
+      ;;
+    "$GENERATED_OPTION" | generated | GENERATED)
+      header_info
+      echo -e "${DEFAULT}${BOLD}${BL}Using Generated Settings on node $PVEHOST_NAME${CL}"
+      VERBOSE="no"
+      METHOD="generated"
+      base_settings "$VERBOSE"
+      echo_default
+      break
       ;;
     *)
       echo -e "${CROSS}${RD}Invalid option: $CHOICE${CL}"
@@ -2966,12 +3665,13 @@ settings_menu() {
     local settings_items=(
       "1" "Manage API-Diagnostic Setting"
       "2" "Edit Default.vars"
+      "3" "Configure dev mode"
     )
     if [ -f "$(get_app_defaults_path)" ]; then
-      settings_items+=("3" "Edit App.vars for ${APP}")
-      settings_items+=("4" "Back to Main Menu")
+      settings_items+=("4" "Edit App.vars for ${APP}")
+      settings_items+=("5" "Back to Main Menu")
     else
-      settings_items+=("3" "Back to Main Menu")
+      settings_items+=("4" "Back to Main Menu")
     fi
 
     local choice
@@ -2985,7 +3685,8 @@ settings_menu() {
     case "$choice" in
     1) diagnostics_menu ;;
     2) nano /usr/local/community-scripts/default.vars ;;
-    3)
+    3) dev_mode_menu ;;
+    4)
       if [ -f "$(get_app_defaults_path)" ]; then
         nano "$(get_app_defaults_path)"
       else
@@ -2993,7 +3694,7 @@ settings_menu() {
         return
       fi
       ;;
-    4)
+    5)
       # Back to main menu
       return
       ;;
@@ -3028,21 +3729,29 @@ check_container_resources() {
 # ------------------------------------------------------------------------------
 # check_container_storage()
 #
-# - Checks /boot partition usage
+# - Checks root (/) partition usage
 # - Warns if usage >80% and asks user confirmation before proceeding
 # ------------------------------------------------------------------------------
 check_container_storage() {
-  total_size=$(df /boot --output=size | tail -n 1)
-  local used_size=$(df /boot --output=used | tail -n 1)
-  usage=$((100 * used_size / total_size))
-  if ((usage > 80)); then
-    echo -e "${INFO}${HOLD} ${YWB}Warning: Storage is dangerously low (${usage}%).${CL}"
-    echo -ne "Continue anyway? <y/N>  "
+  usage=$(df / -P | awk 'NR==2 {print $5}' | tr -d '%')
+
+  if [ -z "$usage" ] || [ "$usage" -lt 0 ]; then
+    echo -e "${CROSS}${HOLD}${RD}Error: Failed to check disk usage.${CL}"
+    exit 1
+  fi
+
+  if [ "$usage" -gt 80 ]; then
+    echo -e "${INFO}${HOLD}${YWB}Warning: Storage is dangerously low (${usage}%).${CL}"
+    printf "Continue anyway? <y/N>  "
     read -r prompt
-    if [[ ! ${prompt,,} =~ ^(y|yes)$ ]]; then
+
+    case "$prompt" in
+    [yY][eE][sS] | [yY]) ;;
+    *)
       echo -e "${CROSS}${HOLD}${YWB}Exiting based on user input.${CL}"
       exit 1
-    fi
+      ;;
+    esac
   fi
 }
 
@@ -3058,9 +3767,9 @@ ssh_extract_keys_from_file() {
   tr -d '\r' <"$f" | awk '
     /^[[:space:]]*#/ {next}
     /^[[:space:]]*$/ {next}
-    # nackt: typ base64 [comment]
+    # bare format: type base64 [comment]
     /^(ssh-(rsa|ed25519)|ecdsa-sha2-nistp256|sk-(ssh-ed25519|ecdsa-sha2-nistp256))[[:space:]]+/ {print; next}
-    # mit Optionen: finde ab erstem Key-Typ
+    # with options: find from first key-type onward
     {
       match($0, /(ssh-(rsa|ed25519)|ecdsa-sha2-nistp256|sk-(ssh-ed25519|ecdsa-sha2-nistp256))[[:space:]]+/)
       if (RSTART>0) { print substr($0, RSTART) }
@@ -3134,8 +3843,8 @@ ssh_discover_default_files() {
 
 configure_ssh_settings() {
   local step_info="${1:-}"
-  local backtitle="[dev] Proxmox VE Helper Scripts"
-  [[ -n "$step_info" ]] && backtitle="[dev] Proxmox VE Helper Scripts [${step_info}]"
+  local backtitle="Proxmox VE Helper Scripts"
+  [[ -n "$step_info" ]] && backtitle="Proxmox VE Helper Scripts [${step_info}]"
 
   SSH_KEYS_FILE="$(mktemp)"
   : >"$SSH_KEYS_FILE"
@@ -3225,6 +3934,69 @@ configure_ssh_settings() {
 }
 
 # ------------------------------------------------------------------------------
+# msg_menu()
+#
+# - Displays a numbered menu for update_script() functions
+# - In silent mode (PHS_SILENT=1): auto-selects the default option
+# - In interactive mode: shows menu via read with 10s timeout + default fallback
+# - Usage: CHOICE=$(msg_menu "Title" "tag1" "Description 1" "tag2" "Desc 2" ...)
+# - The first item is always the default
+# - Returns the selected tag to stdout
+# - If no valid selection or timeout, returns the default (first) tag
+# ------------------------------------------------------------------------------
+msg_menu() {
+  local title="$1"
+  shift
+
+  # Parse items into parallel arrays: tags[] and descriptions[]
+  local -a tags=()
+  local -a descs=()
+  while [[ $# -ge 2 ]]; do
+    tags+=("$1")
+    descs+=("$2")
+    shift 2
+  done
+
+  local default_tag="${tags[0]}"
+  local count=${#tags[@]}
+
+  # Silent mode: return default immediately
+  if [[ -n "${PHS_SILENT+x}" ]] && [[ "${PHS_SILENT}" == "1" ]]; then
+    echo "$default_tag"
+    return 0
+  fi
+
+  # Display menu to /dev/tty so it doesn't get captured by command substitution
+  {
+    echo ""
+    msg_custom "📋" "${BL}" "${title}"
+    echo ""
+    for i in "${!tags[@]}"; do
+      local marker="  "
+      [[ $i -eq 0 ]] && marker="* "
+      printf "${TAB3}${marker}%s) %s\n" "${tags[$i]}" "${descs[$i]}"
+    done
+    echo ""
+  } >/dev/tty
+
+  local selection=""
+  read -r -t 10 -p "${TAB3}Select [default=${default_tag}, timeout 10s]: " selection </dev/tty >/dev/tty || true
+
+  # Validate selection
+  if [[ -n "$selection" ]]; then
+    for tag in "${tags[@]}"; do
+      if [[ "$selection" == "$tag" ]]; then
+        echo "$selection"
+        return 0
+      fi
+    done
+    msg_warn "Invalid selection '${selection}' - using default: ${default_tag}"
+  fi
+
+  echo "$default_tag"
+  return 0
+}
+# ------------------------------------------------------------------------------
 # start()
 #
 # - Entry point of script
@@ -3233,7 +4005,7 @@ configure_ssh_settings() {
 # - Otherwise: shows update/setting menu and runs update_script with cleanup
 # ------------------------------------------------------------------------------
 start() {
-  source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/tools.func)
+  source <(curl -fsSL "$COMMUNITY_SCRIPTS_URL/misc/tools.func")
   if command -v pveversion >/dev/null 2>&1; then
     install_script || return 0
     return 0
@@ -3244,7 +4016,7 @@ start() {
     update_script
     cleanup_lxc
   else
-    CHOICE=$(whiptail --backtitle "[dev] Proxmox VE Helper Scripts" --title "${APP} LXC Update/Setting" --menu \
+    CHOICE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "${APP} LXC Update/Setting" --menu \
       "Support/Update functions for ${APP} LXC. Choose an option:" \
       12 60 3 \
       "1" "YES (Silent Mode)" \
@@ -3302,7 +4074,7 @@ build_container() {
     esac
   fi
 
-  # IP (immer zwingend, Standard dhcp)
+  # IP (always required, default dhcp)
   NET_STRING+=",ip=${NET:-dhcp}"
 
   # Gateway
@@ -3359,18 +4131,19 @@ build_container() {
     FEATURES="${FEATURES}fuse=1"
   fi
 
-  # NEW IMPLEMENTATION (Fixed): Build PCT_OPTIONS properly
-  # Key insight: Bash cannot export arrays, so we build the options as a string
-
+  # Build PCT_OPTIONS as string for export
   TEMP_DIR=$(mktemp -d)
   pushd "$TEMP_DIR" >/dev/null
-
-  # Unified install.func automatically detects OS type (debian, alpine, fedora, etc.)
-  export FUNCTIONS_FILE_PATH="$(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/install.func)"
+  if [ "$var_os" == "alpine" ]; then
+    export FUNCTIONS_FILE_PATH="$(curl -fsSL "$COMMUNITY_SCRIPTS_URL/misc/alpine-install.func")"
+  else
+    export FUNCTIONS_FILE_PATH="$(curl -fsSL "$COMMUNITY_SCRIPTS_URL/misc/install.func")"
+  fi
 
   # Core exports for install.func
   export DIAGNOSTICS="$DIAGNOSTICS"
   export RANDOM_UUID="$RANDOM_UUID"
+  export EXECUTION_ID="$EXECUTION_ID"
   export SESSION_ID="$SESSION_ID"
   export CACHER="$APT_CACHER"
   export CACHER_IP="$APT_CACHER_IP"
@@ -3385,15 +4158,22 @@ build_container() {
   export CTTYPE="$CT_TYPE"
   export ENABLE_FUSE="$ENABLE_FUSE"
   export ENABLE_TUN="$ENABLE_TUN"
-  export ENABLE_GPU="$ENABLE_GPU"
-  export IPV6_METHOD="$IPV6_METHOD"
   export PCT_OSTYPE="$var_os"
   export PCT_OSVERSION="$var_version"
   export PCT_DISK_SIZE="$DISK_SIZE"
+  export IPV6_METHOD="$IPV6_METHOD"
+  export ENABLE_GPU="$ENABLE_GPU"
+  export APPLICATION_VERSION="${var_appversion:-}"
 
   # DEV_MODE exports (optional, for debugging)
   export BUILD_LOG="$BUILD_LOG"
   export INSTALL_LOG="/root/.install-${SESSION_ID}.log"
+  export COMMUNITY_SCRIPTS_URL="$COMMUNITY_SCRIPTS_URL"
+  # Keep host-side logging on BUILD_LOG (not exported — invisible to container)
+  # Without this, get_active_logfile() would return INSTALL_LOG (a container path)
+  # and all host msg_info/msg_ok/msg_error would write to /root/.install-SESSION.log
+  # on the HOST instead of BUILD_LOG, causing incomplete telemetry logs.
+  _HOST_LOGFILE="$BUILD_LOG"
   export dev_mode="${dev_mode:-}"
   export DEV_MODE_MOTD="${DEV_MODE_MOTD:-false}"
   export DEV_MODE_KEEP="${DEV_MODE_KEEP:-false}"
@@ -3403,36 +4183,23 @@ build_container() {
   export DEV_MODE_LOGS="${DEV_MODE_LOGS:-false}"
   export DEV_MODE_DRYRUN="${DEV_MODE_DRYRUN:-false}"
 
-  # Validate storage space before container creation
-  if [[ -n "$CONTAINER_STORAGE" ]]; then
-    msg_info "Validating storage space"
-    if ! validate_storage_space "$CONTAINER_STORAGE" "$DISK_SIZE" "no"; then
-      local free_space
-      free_space=$(pvesm status 2>/dev/null | awk -v s="$CONTAINER_STORAGE" '$1 == s { print $6 }')
-      local free_fmt
-      free_fmt=$(numfmt --to=iec --from-unit=1024 --suffix=B --format %.1f "$free_space" 2>/dev/null || echo "${free_space}KB")
-      msg_error "Not enough space on '$CONTAINER_STORAGE'. Required: ${DISK_SIZE}GB, Available: ${free_fmt}"
-      exit 214
-    fi
-    msg_ok "Storage space validated"
-  fi
+  # MODE export for unattended detection in install scripts
+  # This tells install scripts whether to prompt for input or use defaults
+  export MODE="${METHOD:-default}"
 
   # Build PCT_OPTIONS as multi-line string
-  PCT_OPTIONS_STRING=""
+  PCT_OPTIONS_STRING="  -hostname $HN"
 
-  # Add features if set
-  if [ -n "$FEATURES" ]; then
-    PCT_OPTIONS_STRING="  -features $FEATURES"
-  fi
-
-  # Add hostname
-  PCT_OPTIONS_STRING="$PCT_OPTIONS_STRING
-  -hostname $HN"
-
-  # Add tags if set
+  # Only add -tags if TAGS is not empty
   if [ -n "$TAGS" ]; then
     PCT_OPTIONS_STRING="$PCT_OPTIONS_STRING
   -tags $TAGS"
+  fi
+
+  # Only add -features if FEATURES is not empty
+  if [ -n "$FEATURES" ]; then
+    PCT_OPTIONS_STRING="  -features $FEATURES
+$PCT_OPTIONS_STRING"
   fi
 
   # Add storage if specified
@@ -3461,10 +4228,12 @@ build_container() {
   -protection 1"
   fi
 
-  # Timezone flag (if var_timezone was set)
+  # Timezone (map Etc/* to "host" as pct doesn't accept them)
   if [ -n "${CT_TIMEZONE:-}" ]; then
+    local _pct_timezone="$CT_TIMEZONE"
+    [[ "$_pct_timezone" == Etc/* ]] && _pct_timezone="host"
     PCT_OPTIONS_STRING="$PCT_OPTIONS_STRING
-  -timezone $CT_TIMEZONE"
+  -timezone $_pct_timezone"
   fi
 
   # Password (already formatted)
@@ -3478,13 +4247,24 @@ build_container() {
   export TEMPLATE_STORAGE="${var_template_storage:-}"
   export CONTAINER_STORAGE="${var_container_storage:-}"
 
-  # # DEBUG: Show final PCT_OPTIONS being exported
-  # echo "[DEBUG] PCT_OPTIONS to be exported:"
-  # echo "$PCT_OPTIONS" | sed 's/^/  /'
-  # echo "[DEBUG] Calling create_lxc_container..."
+  # Validate storage space only if CONTAINER_STORAGE is already set
+  # (Storage selection happens in create_lxc_container for some modes)
+  if [[ -n "$CONTAINER_STORAGE" ]]; then
+    msg_info "Validating storage space"
+    if ! validate_storage_space "$CONTAINER_STORAGE" "$DISK_SIZE" "no"; then
+      local free_space
+      free_space=$(pvesm status 2>/dev/null | awk -v s="$CONTAINER_STORAGE" '$1 == s { print $6 }')
+      local free_fmt
+      free_fmt=$(numfmt --to=iec --from-unit=1024 --suffix=B --format %.1f "$free_space" 2>/dev/null || echo "${free_space}KB")
+      msg_error "Not enough space on '$CONTAINER_STORAGE'. Required: ${DISK_SIZE}GB, Available: ${free_fmt}"
+      exit 214
+    fi
+    msg_ok "Storage space validated"
+  fi
 
   create_lxc_container || exit $?
-
+  # Transition to 'configuring' — container created, now setting up OS/userland
+  post_progress_to_api "configuring"
   LXC_CONFIG="/etc/pve/lxc/${CTID}.conf"
 
   # ============================================================================
@@ -3540,12 +4320,16 @@ build_container() {
       msg_custom "🎮" "${GN}" "Detected NVIDIA GPU"
 
       # Simple passthrough - just bind /dev/nvidia* devices if they exist
-      # Skip directories like /dev/nvidia-caps (they need special handling)
+      # Only include character devices (-c), skip directories like /dev/nvidia-caps
       for d in /dev/nvidia*; do
-        [[ -e "$d" ]] || continue
-        [[ -d "$d" ]] && continue # Skip directories
-        NVIDIA_DEVICES+=("$d")
+        [[ -c "$d" ]] && NVIDIA_DEVICES+=("$d")
       done
+      # Also check for devices inside /dev/nvidia-caps/ directory
+      if [[ -d /dev/nvidia-caps ]]; then
+        for d in /dev/nvidia-caps/*; do
+          [[ -c "$d" ]] && NVIDIA_DEVICES+=("$d")
+        done
+      fi
 
       if [[ ${#NVIDIA_DEVICES[@]} -gt 0 ]]; then
         msg_custom "🎮" "${GN}" "Found ${#NVIDIA_DEVICES[@]} NVIDIA device(s) for passthrough"
@@ -3628,12 +4412,8 @@ EOF
       selected_gpu="${available_gpus[0]}"
       msg_ok "Automatically configuring ${selected_gpu} GPU passthrough"
     else
-      # Multiple GPUs - ask user
-      echo -e "\n${INFO} Multiple GPU types detected:"
-      for gpu in "${available_gpus[@]}"; do
-        echo "  - $gpu"
-      done
-      read -rp "Which GPU type to passthrough? (${available_gpus[*]}): " selected_gpu
+      # Multiple GPUs - ask user (use first as default in unattended mode)
+      selected_gpu=$(prompt_select "Which GPU type to passthrough?" 1 60 "${available_gpus[@]}")
       selected_gpu="${selected_gpu^^}"
 
       # Validate selection
@@ -3778,7 +4558,6 @@ EOF
       msg_ok "Network in LXC is reachable (ping)"
     fi
   fi
-
   # Function to get correct GID inside container
   get_container_gid() {
     local group="$1"
@@ -3788,188 +4567,300 @@ EOF
 
   fix_gpu_gids
 
-  # Continue with standard container setup
+  # Fix Debian 13 LXC template bug where / is owned by nobody:nogroup
+  # This causes systemd-tmpfiles to fail with "unsafe path transition" errors
+  # We need to fix this from the host before any package installation
+  if [[ "$var_os" == "debian" && "$var_version" == "13" ]]; then
+    # Stop container, fix ownership, restart
+    pct stop "$CTID" >/dev/null 2>&1 || true
+    sleep 1
+    # Get the actual rootfs path from pct mount
+    local rootfs_path
+    rootfs_path=$(pct mount "$CTID" 2>/dev/null | grep -oP 'mounted at \K.*' || echo "")
+    if [[ -n "$rootfs_path" && -d "$rootfs_path" ]]; then
+      chown root:root "$rootfs_path" 2>/dev/null || true
+    fi
+    pct unmount "$CTID" >/dev/null 2>&1 || true
+    pct start "$CTID" >/dev/null 2>&1
+    sleep 3
+  fi
+
   msg_info "Customizing LXC Container"
-
-  # # Install GPU userland if configured
-  # if [[ "${ENABLE_VAAPI:-0}" == "1" ]]; then
-  #   install_gpu_userland "VAAPI"
-  # fi
-
-  # if [[ "${ENABLE_NVIDIA:-0}" == "1" ]]; then
-  #   install_gpu_userland "NVIDIA"
-  # fi
-
-  # Continue with standard container setup - install core dependencies based on OS
-  sleep 3
-
-  case "$var_os" in
-  alpine)
+  # Continue with standard container setup
+  if [ "$var_os" == "alpine" ]; then
+    sleep 3
     pct exec "$CTID" -- /bin/sh -c 'cat <<EOF >/etc/apk/repositories
 http://dl-cdn.alpinelinux.org/alpine/latest-stable/main
 http://dl-cdn.alpinelinux.org/alpine/latest-stable/community
 EOF'
-    pct exec "$CTID" -- ash -c "apk add bash newt curl openssh nano mc ncurses jq >/dev/null"
-    ;;
+    pct exec "$CTID" -- ash -c "apk add bash newt curl openssh nano mc ncurses jq >/dev/null" || {
+      msg_warn "apk install failed (dl-cdn.alpinelinux.org), trying alternate mirrors..."
+      local alpine_exit=0
+      pct exec "$CTID" -- ash -c '
+        ALPINE_MIRRORS="mirror.init7.net ftp.halifax.rwth-aachen.de mirrors.edge.kernel.org alpine.mirror.wearetriple.com mirror.leaseweb.com uk.alpinelinux.org dl-2.alpinelinux.org dl-4.alpinelinux.org"
+        for m in $(printf "%s\n" $ALPINE_MIRRORS | shuf); do
+          if wget -q --spider --timeout=2 "http://$m/alpine/latest-stable/main/" 2>/dev/null; then
+            echo "  Attempting mirror: $m"
+            cat <<EOF >/etc/apk/repositories
+http://$m/alpine/latest-stable/main
+http://$m/alpine/latest-stable/community
+EOF
+            if apk update >/dev/null 2>&1 && apk add bash newt curl openssh nano mc ncurses jq >/dev/null 2>&1; then
+              echo "  CDN set to $m: tests passed"
+              exit 0
+            else
+              echo "  Mirror $m failed"
+            fi
+          fi
+        done
+        exit 2
+      ' && alpine_exit=0 || alpine_exit=$?
+      if [[ $alpine_exit -ne 0 ]]; then
+        msg_error "apk base packages installation failed"
+        exit 1
+      fi
+    }
+  elif [[ "$var_os" =~ ^(debian|ubuntu|devuan)$ ]]; then
+    sleep 3
+    LANG=${LANG:-en_US.UTF-8}
 
-  debian | ubuntu | devuan)
-    # First install locales package (required for locale-gen on minimal templates)
-    pct exec "$CTID" -- bash -c "apt-get update >/dev/null && apt-get install -y locales >/dev/null 2>&1 || true"
+    # Force C locale inside the container until proper locales are generated.
+    # Otherwise perl/apt spam "Setting locale failed" because pct exec inherits
+    # the host's LANG (e.g. en_US.UTF-8) which isn't generated in fresh templates.
+    local _ct_env='export LC_ALL=C.UTF-8 LANG=C.UTF-8 DEBIAN_FRONTEND=noninteractive;'
 
-    # Locale setup for Debian-based
-    pct exec "$CTID" -- bash -c "sed -i '/$LANG/ s/^# //' /etc/locale.gen 2>/dev/null || true"
-    pct exec "$CTID" -- bash -c "locale_line=\$(grep -v '^#' /etc/locale.gen 2>/dev/null | grep -E '^[a-zA-Z]' | awk '{print \$1}' | head -n 1) && \
-      [[ -n \"\$locale_line\" ]] && echo LANG=\$locale_line >/etc/default/locale && \
-      locale-gen >/dev/null 2>&1 && \
-      export LANG=\$locale_line || true"
-
-    # Timezone setup
-    if [[ -z "${tz:-}" ]]; then
-      tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "Etc/UTC")
+    # Devuan templates don't include locales package by default - install it first
+    if [ "$var_os" == "devuan" ]; then
+      pct exec "$CTID" -- bash -c "${_ct_env} apt-get update >/dev/null && apt-get install -y locales >/dev/null" || true
     fi
+
+    # Only configure locale if locale.gen exists (some minimal templates don't have it)
+    if pct exec "$CTID" -- test -f /etc/locale.gen 2>/dev/null; then
+      pct exec "$CTID" -- bash -c "${_ct_env} sed -i \"/$LANG/ s/^# //\" /etc/locale.gen"
+      pct exec "$CTID" -- bash -c "${_ct_env} locale_line=\$(grep -v '^#' /etc/locale.gen | grep -E '^[a-zA-Z]' | awk '{print \$1}' | head -n 1) && \
+      echo LANG=\$locale_line >/etc/default/locale && \
+      locale-gen >/dev/null && \
+      export LANG=\$locale_line"
+    fi
+
+    if [[ -z "${tz:-}" ]]; then
+      tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
+    fi
+    [[ "${tz:-}" == Etc/* ]] && tz="UTC" # Normalize Etc/* to UTC for container setup
+
     if pct exec "$CTID" -- test -e "/usr/share/zoneinfo/$tz"; then
-      pct exec "$CTID" -- bash -c "tz='$tz'; ln -sf \"/usr/share/zoneinfo/\$tz\" /etc/localtime && echo \"\$tz\" >/etc/timezone || true"
+      # Set timezone using symlink (Debian 13+ compatible)
+      # Create /etc/timezone for backwards compatibility with older scripts
+      pct exec "$CTID" -- bash -c "${_ct_env} tz='$tz'; ln -sf \"/usr/share/zoneinfo/\$tz\" /etc/localtime && echo \"\$tz\" >/etc/timezone || true"
     else
       msg_warn "Skipping timezone setup – zone '$tz' not found in container"
     fi
 
-    # Core dependencies
-    pct exec "$CTID" -- bash -c "apt-get update >/dev/null && apt-get install -y sudo curl mc gnupg2 jq >/dev/null" || {
-      msg_error "apt-get base packages installation failed"
-      exit 1
-    }
-    ;;
-
-  fedora | rockylinux | almalinux | centos)
-    # RHEL-based: Fedora, Rocky, AlmaLinux, CentOS
-    # Detect OS major version for EL10+ compatibility (DNF 5, different packages)
-    local rhel_version
-    rhel_version=$(pct exec "$CTID" -- bash -c "grep -oP '(?<=VERSION_ID=\")[0-9]+' /etc/os-release 2>/dev/null || echo 9")
-
-    # First run makecache to ensure repos are ready (critical for fresh templates)
-    msg_info "Initializing package manager (this may take a moment)..."
-    if ! pct exec "$CTID" -- bash -c "dnf makecache --refresh 2>&1 || yum makecache 2>&1" >/dev/null 2>&1; then
-      msg_warn "Package cache update had issues, continuing anyway..."
+    local _base_pkgs="sudo curl mc gnupg2 jq"
+    if [[ "${ARCH:-amd64}" == "arm64" ]]; then
+      _base_pkgs+=" openssh-server wget gcc"
     fi
 
-    # Build package list - EL10+ may not have glibc-langpack-en in same form
-    local rhel_packages="curl sudo mc jq which tar procps-ng ncurses"
-    if [[ "$rhel_version" -lt 10 ]]; then
-      rhel_packages="$rhel_packages glibc-langpack-en"
-    else
-      # EL10 uses glibc-all-langpacks or langpacks-en
-      rhel_packages="$rhel_packages langpacks-en glibc-all-langpacks"
+    # Detect broken DNS resolver (e.g. Tailscale MagicDNS) and inject public DNS
+    if ! pct exec "$CTID" -- bash -c "${_ct_env} getent hosts deb.debian.org >/dev/null 2>&1 && getent hosts archive.ubuntu.com >/dev/null 2>&1"; then
+      msg_warn "APT repository DNS resolution failed in container, injecting public DNS servers"
+      pct exec "$CTID" -- bash -c "echo -e 'nameserver 8.8.8.8\nnameserver 1.1.1.1' >/etc/resolv.conf"
     fi
 
-    # Install base packages with better error handling
-    local install_log="/tmp/dnf_install_${CTID}.log"
-    if ! pct exec "$CTID" -- bash -c "dnf install -y $rhel_packages 2>&1 | tee $install_log; exit \${PIPESTATUS[0]}" >/dev/null 2>&1; then
-      # Check if it's just missing optional packages
-      if pct exec "$CTID" -- bash -c "rpm -q curl sudo mc jq which tar procps-ng" >/dev/null 2>&1; then
-        msg_warn "Some optional packages may have failed, but core packages installed"
-      else
-        # Real failure - try minimal install
-        msg_warn "Full package install failed, trying minimal set..."
-        if ! pct exec "$CTID" -- bash -c "dnf install -y curl sudo jq which tar 2>&1" >/dev/null 2>&1; then
-          msg_error "dnf/yum base packages installation failed"
-          pct exec "$CTID" -- bash -c "cat $install_log 2>/dev/null" || true
+    pct exec "$CTID" -- bash -c "${_ct_env} apt-get update >/dev/null 2>&1 && apt-get install -y ${_base_pkgs} >/dev/null 2>&1" || {
+      local failed_mirror
+      failed_mirror=$(pct exec "$CTID" -- bash -c "grep -m1 -oP '(?<=URIs: https?://)[^/]+' /etc/apt/sources.list.d/debian.sources 2>/dev/null || grep -m1 -oP '(?<=deb https?://)[^/]+' /etc/apt/sources.list 2>/dev/null" 2>/dev/null || echo "unknown")
+      msg_warn "apt-get update failed (${failed_mirror}), trying alternate mirrors..."
+      local mirror_exit=0
+      pct exec "$CTID" -- env APT_BASE="$_base_pkgs" bash -c '
+        DISTRO=$(. /etc/os-release 2>/dev/null && echo "$ID" || echo "debian")
+
+        if [ "$DISTRO" = "ubuntu" ]; then
+          EU_MIRRORS="de.archive.ubuntu.com fr.archive.ubuntu.com se.archive.ubuntu.com nl.archive.ubuntu.com it.archive.ubuntu.com ch.archive.ubuntu.com mirrors.xtom.de"
+          US_MIRRORS="us.archive.ubuntu.com archive.ubuntu.com mirrors.edge.kernel.org mirror.csclub.uwaterloo.ca mirrors.ocf.berkeley.edu mirror.math.princeton.edu"
+          AP_MIRRORS="au.archive.ubuntu.com jp.archive.ubuntu.com kr.archive.ubuntu.com tw.archive.ubuntu.com mirror.aarnet.edu.au"
+        else
+          EU_MIRRORS="ftp.de.debian.org ftp.fr.debian.org ftp.nl.debian.org ftp.uk.debian.org ftp.ch.debian.org ftp.se.debian.org ftp.it.debian.org ftp.fau.de ftp.halifax.rwth-aachen.de debian.mirror.lrz.de mirror.init7.net debian.ethz.ch mirrors.dotsrc.org debian.mirrors.ovh.net"
+          US_MIRRORS="ftp.us.debian.org ftp.ca.debian.org debian.csail.mit.edu mirrors.ocf.berkeley.edu mirrors.wikimedia.org debian.osuosl.org mirror.cogentco.com"
+          AP_MIRRORS="ftp.au.debian.org ftp.jp.debian.org ftp.tw.debian.org ftp.kr.debian.org ftp.hk.debian.org ftp.sg.debian.org mirror.aarnet.edu.au mirror.nitc.ac.in"
+        fi
+
+        TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+        case "$TZ" in
+          Europe/*|Arctic/*) REGIONAL="$EU_MIRRORS"; OTHERS="$US_MIRRORS $AP_MIRRORS" ;;
+          America/*) REGIONAL="$US_MIRRORS"; OTHERS="$EU_MIRRORS $AP_MIRRORS" ;;
+          Asia/*|Australia/*|Pacific/*) REGIONAL="$AP_MIRRORS"; OTHERS="$EU_MIRRORS $US_MIRRORS" ;;
+          *) REGIONAL=""; OTHERS="$EU_MIRRORS $US_MIRRORS $AP_MIRRORS" ;;
+        esac
+
+        echo "Acquire::By-Hash \"no\";" >/etc/apt/apt.conf.d/99no-by-hash
+
+        try_mirrors() {
+          for src in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; do
+            [ -f "$src" ] && sed -i "s|URIs: http[s]*://[^/]*/|URIs: http://${1}/|g; s|deb http[s]*://[^/]*/|deb http://${1}/|g" "$src"
+          done
+          rm -rf /var/lib/apt/lists/*
+          APT_OUT=$(apt-get update 2>&1)
+          APT_RC=$?
+          if echo "$APT_OUT" | grep -qi "hashsum\|hash sum"; then
+            echo "  Mirror $1 failed (hash mismatch)"
+            return 1
+          elif echo "$APT_OUT" | grep -qi "SSL\|certificate"; then
+            echo "  Mirror $1 failed (SSL/certificate error)"
+            return 1
+          elif [ $APT_RC -ne 0 ]; then
+            echo "  Mirror $1 failed (apt-get update error)"
+            return 1
+          elif apt-get install -y $APT_BASE >/dev/null 2>&1; then
+            echo "  CDN set to $1: tests passed"
+            return 0
+          else
+            echo "  Mirror $1 failed (package install error)"
+            return 1
+          fi
+        }
+
+        scan_reachable() {
+          local result=""
+          for m in $1; do
+            if timeout 2 bash -c "echo >/dev/tcp/$m/80" 2>/dev/null; then
+              result="$result $m"
+            fi
+          done
+          echo "$result" | xargs
+        }
+
+        # Phase 1: Scan global mirrors first (independent of local CDN issues)
+        OTHERS_OK=$(scan_reachable "$OTHERS")
+        OTHERS_PICK=$(printf "%s\n" $OTHERS_OK | shuf | head -3 | xargs)
+
+        for mirror in $OTHERS_PICK; do
+          echo "  Attempting mirror: $mirror"
+          try_mirrors "$mirror" && exit 0
+        done
+
+        # Phase 2: Try primary mirror
+        if [ "$DISTRO" = "ubuntu" ]; then
+          PRIMARY="archive.ubuntu.com"
+        else
+          PRIMARY="ftp.debian.org"
+        fi
+        if timeout 2 bash -c "echo >/dev/tcp/$PRIMARY/80" 2>/dev/null; then
+          echo "  Attempting mirror: $PRIMARY"
+          try_mirrors "$PRIMARY" && exit 0
+        fi
+
+        # Phase 3: Fall back to regional mirrors
+        REGIONAL_OK=$(scan_reachable "$REGIONAL")
+        REGIONAL_PICK=$(printf "%s\n" $REGIONAL_OK | shuf | head -3 | xargs)
+
+        for mirror in $REGIONAL_PICK; do
+          echo "  Attempting mirror: $mirror"
+          try_mirrors "$mirror" && exit 0
+        done
+
+        exit 2
+      ' && mirror_exit=0 || mirror_exit=$?
+      if [[ $mirror_exit -eq 2 ]]; then
+        msg_warn "Multiple mirrors failed (possible CDN synchronization issue)."
+        if [[ "$var_os" == "ubuntu" ]]; then
+          msg_warn "Find Ubuntu mirrors at: https://launchpad.net/ubuntu/+archivemirrors"
+        else
+          msg_warn "Find Debian mirrors at: https://www.debian.org/mirror/list"
+        fi
+        local custom_mirror=""
+        while true; do
+          read -rp "  Enter a mirror hostname (or 'skip' to abort): " custom_mirror </dev/tty
+          [[ -z "$custom_mirror" ]] && continue
+          [[ "$custom_mirror" == "skip" ]] && break
+          [[ ! "$custom_mirror" =~ ^[a-zA-Z0-9._-]+$ ]] && {
+            msg_warn "Invalid hostname format."
+            continue
+          }
+          pct exec "$CTID" -- bash -c "
+            for src in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; do
+              [ -f \"\$src\" ] && sed -i \"s|URIs: http[s]*://[^/]*/|URIs: http://${custom_mirror}/|g; s|deb http[s]*://[^/]*/|deb http://${custom_mirror}/|g\" \"\$src\"
+            done
+            rm -rf /var/lib/apt/lists/*
+            apt-get update >/dev/null 2>&1 && apt-get install -y ${_base_pkgs} >/dev/null 2>&1
+          " && break
+          msg_warn "Mirror '${custom_mirror}' also failed. Try another or type 'skip'."
+        done
+        if [[ "$custom_mirror" == "skip" ]]; then
+          msg_error "apt-get base packages installation failed"
           exit 1
         fi
+      elif [[ $mirror_exit -ne 0 ]]; then
+        msg_error "apt-get base packages installation failed"
+        exit 1
       fi
-    fi
+    }
+  else
+    # Non-apt, non-apk systems: Fedora/Rocky/Alma/CentOS/openEuler/openSUSE/Arch/Gentoo
+    sleep 3
 
-    # Set locale for RHEL-based systems
-    pct exec "$CTID" -- bash -c "localectl set-locale LANG=en_US.UTF-8 2>/dev/null || echo 'LANG=en_US.UTF-8' > /etc/locale.conf" || true
-
-    # Timezone setup for RHEL
+    # Set timezone (host's timezone, falling back to UTC)
     if [[ -z "${tz:-}" ]]; then
-      tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "Etc/UTC")
+      tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
     fi
     [[ "${tz:-}" == Etc/* ]] && tz="UTC"
     if pct exec "$CTID" -- test -e "/usr/share/zoneinfo/$tz"; then
-      pct exec "$CTID" -- bash -c "timedatectl set-timezone '$tz' 2>/dev/null || ln -sf '/usr/share/zoneinfo/$tz' /etc/localtime" || true
-    fi
-    ;;
-
-  opensuse)
-    # openSUSE - special handling for terminal/locale issues
-    # Use --gpg-auto-import-keys to avoid interactive prompts that cause hangs
-    msg_info "Initializing package manager for openSUSE..."
-    pct exec "$CTID" -- bash -c "zypper --gpg-auto-import-keys --non-interactive refresh 2>&1" >/dev/null 2>&1 || true
-
-    # Install packages - ncurses and terminfo are CRITICAL for terminal to work
-    if ! pct exec "$CTID" -- bash -c "zypper --gpg-auto-import-keys --non-interactive install -y curl sudo mc jq glibc-locale ncurses terminfo-base 2>&1" >/dev/null 2>&1; then
-      # Try without glibc-locale
-      if ! pct exec "$CTID" -- bash -c "zypper --gpg-auto-import-keys --non-interactive install -y curl sudo mc jq ncurses terminfo-base 2>&1" >/dev/null 2>&1; then
-        msg_error "zypper base packages installation failed"
-        exit 1
-      fi
+      pct exec "$CTID" -- bash -c "ln -sf \"/usr/share/zoneinfo/$tz\" /etc/localtime && echo \"$tz\" >/etc/timezone || true"
     fi
 
-    # Fix 'unknown terminal type' error - set TERM in multiple places
-    pct exec "$CTID" -- bash -c "localectl set-locale LANG=en_US.UTF-8 2>/dev/null || echo 'LANG=en_US.UTF-8' > /etc/locale.conf" || true
+    # Fix blank PVE noVNC console on distros with util-linux >= 2.40.3 and
+    # bash/readline 8.2+ (Fedora 43, Arch rolling): agetty and readline both send
+    # ESC[6n (cursor position query); the VNC terminal responds with ESC[row;colR
+    # which gets read as keyboard input (shows as "R;80R;" garbage at the prompt).
+    # Three-layer fix:
+    #  1. console-getty drop-in: TERM=linux stops agetty from querying (fixes MOTD blank)
+    #  2. /etc/environment: PAM passes TERM before /etc/profile runs (fixes openSUSE tset)
+    #  3. /etc/profile.d/99-pve-console-term.sh: re-asserts TERM=linux AFTER all other
+    #     profile.d scripts, so readline never thinks CPR is supported (fixes R;80R garbage)
+    case "$var_os" in
+    fedora | rocky | rockylinux | alma | almalinux | centos | openeuler | opensuse | archlinux | arch)
+      pct exec "$CTID" -- bash -c '
+        mkdir -p /etc/systemd/system/console-getty.service.d
+        printf "[Service]\nEnvironment=TERM=linux\n" >/etc/systemd/system/console-getty.service.d/pve-console-term.conf
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl restart console-getty.service 2>/dev/null || true
 
-    # Set TERM globally for all users
-    pct exec "$CTID" -- bash -c "cat > /etc/profile.d/term.sh << 'EOFTERM'
-# Fix terminal type for LXC containers
-if [ -z \"\$TERM\" ] || [ \"\$TERM\" = \"dumb\" ] || [ \"\$TERM\" = \"-\" ]; then
-    export TERM=xterm-256color
-fi
-EOFTERM
-chmod +x /etc/profile.d/term.sh" || true
+        # Layer 2: PAM environment (read before /etc/profile)
+        grep -q "^TERM=" /etc/environment 2>/dev/null || echo "TERM=linux" >>/etc/environment
 
-    # Also set in /etc/environment for non-login shells
-    pct exec "$CTID" -- bash -c "grep -q '^TERM=' /etc/environment 2>/dev/null || echo 'TERM=xterm-256color' >> /etc/environment" || true
-    ;;
+        # Layer 3: profile.d script that runs last (99-) to override any earlier TERM changes
+        mkdir -p /etc/profile.d
+        cat >/etc/profile.d/99-pve-console-term.sh <<'"'"'PROFILE'"'"'
+# Ensure TERM=linux on PVE noVNC console to prevent ESC[6n CPR responses
+# being read as keyboard input by bash/readline 8.2+ (shows as R;80R garbage).
+_pve_t=$(tty 2>/dev/null)
+case "$_pve_t" in
+  /dev/console|/dev/tty[0-9]*)
+    export TERM=linux ;;
+esac
+unset _pve_t
+PROFILE
+        chmod 644 /etc/profile.d/99-pve-console-term.sh
+      ' 2>/dev/null || true
+      ;;
+    esac
 
-  gentoo)
-    # Gentoo - OpenRC based, emerge is slow
-    # Use emerge-webrsync (faster, uses http instead of rsync)
-    msg_info "Syncing Gentoo portage via webrsync (faster than rsync)..."
-    pct exec "$CTID" -- bash -c "emerge-webrsync 2>&1" >/dev/null 2>&1 || {
-      msg_warn "emerge-webrsync failed, trying emerge --sync..."
-      pct exec "$CTID" -- bash -c "emerge --sync 2>&1" >/dev/null 2>&1 || true
-    }
-
-    # Install curl FIRST - it's required for install.func to work
-    msg_info "Installing essential packages for Gentoo..."
-    if ! pct exec "$CTID" -- bash -c "emerge --quiet --noreplace net-misc/curl 2>&1" >/dev/null 2>&1; then
-      msg_error "Failed to install curl on Gentoo - this is required"
-      exit 1
-    fi
-
-    # Install remaining packages
-    pct exec "$CTID" -- bash -c "emerge --quiet --noreplace app-misc/jq app-misc/mc sys-libs/ncurses 2>&1" >/dev/null 2>&1 || {
-      msg_warn "Some Gentoo packages may need manual setup"
-    }
-
-    # Set TERM for Gentoo
-    pct exec "$CTID" -- bash -c "echo 'export TERM=xterm-256color' >> /etc/profile.d/term.sh && chmod +x /etc/profile.d/term.sh" || true
-    ;;
-
-  openeuler)
-    # openEuler (RHEL-compatible, uses DNF)
-    # Note: Template was patched with /etc/redhat-release in create_container
-    msg_info "Initializing package manager for openEuler..."
-    pct exec "$CTID" -- bash -c "dnf makecache --refresh 2>&1" >/dev/null 2>&1 || true
-
-    # openEuler package names may differ from RHEL
-    local euler_packages="curl sudo mc jq procps-ng ncurses"
-    if ! pct exec "$CTID" -- bash -c "dnf install -y $euler_packages 2>&1" >/dev/null 2>&1; then
-      # Try without procps-ng (might be just 'procps' in openEuler)
-      if ! pct exec "$CTID" -- bash -c "dnf install -y curl sudo mc jq ncurses 2>&1" >/dev/null 2>&1; then
-        msg_error "dnf base packages installation failed"
-        exit 1
-      fi
-    fi
-    # Set locale
-    pct exec "$CTID" -- bash -c "echo 'LANG=en_US.UTF-8' > /etc/locale.conf" || true
-    ;;
-
-  *)
-    msg_warn "Unknown OS '$var_os' - skipping core dependency installation"
-    ;;
-  esac
+    # Ensure curl is present for install.func bootstrap (most templates have it, but be safe)
+    case "$var_os" in
+    fedora | rocky | rockylinux | alma | almalinux | centos | openeuler)
+      pct exec "$CTID" -- bash -c "command -v curl >/dev/null 2>&1 || (command -v dnf >/dev/null 2>&1 && dnf install -y curl >/dev/null 2>&1) || (command -v yum >/dev/null 2>&1 && yum install -y curl >/dev/null 2>&1)" || true
+      ;;
+    opensuse)
+      pct exec "$CTID" -- bash -c "command -v curl >/dev/null 2>&1 || zypper -n install curl >/dev/null 2>&1" || true
+      ;;
+    archlinux | arch)
+      pct exec "$CTID" -- bash -c "command -v curl >/dev/null 2>&1 || pacman -Sy --noconfirm curl >/dev/null 2>&1" || true
+      ;;
+    gentoo)
+      pct exec "$CTID" -- bash -c "command -v curl >/dev/null 2>&1 || emerge --quiet net-misc/curl >/dev/null 2>&1" || true
+      ;;
+    esac
+  fi
 
   msg_ok "Customized LXC Container"
 
@@ -3977,16 +4868,16 @@ chmod +x /etc/profile.d/term.sh" || true
   install_ssh_keys_into_ct
 
   # Run application installer
-  # NOTE: We disable error handling here because:
-  # 1. Container errors are caught by error_handler INSIDE container
-  # 2. Container creates flag file with exit code
-  # 3. We read flag file and handle cleanup manually below
-  # 4. We DON'T want host error_handler to fire for lxc-attach command itself
+  # Start timer for duration tracking
+  start_install_timer
 
+  # Disable error trap - container errors are handled internally via flag file
   set +Eeuo pipefail # Disable ALL error handling temporarily
   trap - ERR         # Remove ERR trap completely
 
-  lxc-attach -n "$CTID" -- bash -c "$(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/install/${var_install}.sh)"
+  local _install_script
+  _install_script="$(curl -fsSL "$COMMUNITY_SCRIPTS_URL/install/${var_install}.sh")"
+  lxc-attach -n "$CTID" -- bash -c "$_install_script"
   local lxc_exit=$?
 
   set -Eeuo pipefail       # Re-enable error handling
@@ -4011,25 +4902,54 @@ chmod +x /etc/profile.d/term.sh" || true
   if [[ $install_exit_code -ne 0 ]]; then
     msg_error "Installation failed in container ${CTID} (exit code: ${install_exit_code})"
 
+    # Report failure to telemetry API
+    post_update_to_api "failed" "$install_exit_code"
+
     # Copy both logs from container before potential deletion
     local build_log_copied=false
     local install_log_copied=false
 
     if [[ -n "$CTID" && -n "${SESSION_ID:-}" ]]; then
-      # Copy BUILD_LOG (creation log) if it exists
+      # Create combined log with header
+      {
+        echo "================================================================================"
+        echo "COMBINED INSTALLATION LOG - ${APP:-LXC}"
+        echo "Container ID: ${CTID}"
+        echo "Session ID: ${SESSION_ID}"
+        echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "================================================================================"
+        echo ""
+      } >"$combined_log"
+
+      # Append BUILD_LOG (host-side creation log) if it exists
       if [[ -f "${BUILD_LOG}" ]]; then
-        cp "${BUILD_LOG}" "/tmp/create-lxc-${CTID}-${SESSION_ID}.log" 2>/dev/null && build_log_copied=true
+        {
+          echo "================================================================================"
+          echo "PHASE 1: CONTAINER CREATION (Host)"
+          echo "================================================================================"
+          cat "${BUILD_LOG}"
+          echo ""
+        } >>"$combined_log"
+        build_log_copied=true
       fi
 
-      # Copy INSTALL_LOG from container
-      if pct pull "$CTID" "/root/.install-${SESSION_ID}.log" "/tmp/install-lxc-${CTID}-${SESSION_ID}.log" 2>/dev/null; then
+      # Copy and append INSTALL_LOG from container
+      local temp_install_log="/tmp/.install-temp-${SESSION_ID}.log"
+      if pct pull "$CTID" "/root/.install-${SESSION_ID}.log" "$temp_install_log" 2>/dev/null; then
+        {
+          echo "================================================================================"
+          echo "PHASE 2: APPLICATION INSTALLATION (Container)"
+          echo "================================================================================"
+          cat "$temp_install_log"
+          echo ""
+        } >>"$combined_log"
+        rm -f "$temp_install_log"
         install_log_copied=true
       fi
 
-      # Show available logs
+      # Show combined log
       echo ""
-      [[ "$build_log_copied" == true ]] && echo -e "${GN}✔${CL} Container creation log: ${BL}/tmp/create-lxc-${CTID}-${SESSION_ID}.log${CL}"
-      [[ "$install_log_copied" == true ]] && echo -e "${GN}✔${CL} Installation log: ${BL}/tmp/install-lxc-${CTID}-${SESSION_ID}.log${CL}"
+      echo -e "${GN}✔${CL} Installation log: ${BL}${combined_log}${CL}"
     fi
 
     # Dev mode: Keep container or open breakpoint shell
@@ -4052,46 +4972,352 @@ chmod +x /etc/profile.d/term.sh" || true
       exit $install_exit_code
     fi
 
-    # Report failure to API before container cleanup
-    post_update_to_api "failed" "$install_exit_code"
-
-    # Prompt user for cleanup with 60s timeout (plain echo - no msg_info to avoid spinner)
+    # Prompt user for cleanup with 60s timeout
     echo ""
-    echo -en "${YW}Remove broken container ${CTID}? (Y/n) [auto-remove in 60s]: ${CL}"
 
+    # Detect error type for smart recovery options
+    local is_oom=false
+    local is_network_issue=false
+    local is_apt_issue=false
+    local is_cmd_not_found=false
+    local error_explanation=""
+    if declare -f explain_exit_code >/dev/null 2>&1; then
+      error_explanation="$(explain_exit_code "$install_exit_code")"
+    fi
+
+    # OOM detection: exit codes 134 (SIGABRT/heap), 137 (SIGKILL/OOM), 243 (Node.js heap)
+    if [[ $install_exit_code -eq 134 || $install_exit_code -eq 137 || $install_exit_code -eq 243 ]]; then
+      is_oom=true
+    fi
+
+    # APT/DPKG detection: exit codes 100-102 (APT), 255 (DPKG with log evidence)
+    case "$install_exit_code" in
+    100 | 101 | 102) is_apt_issue=true ;;
+    255)
+      if [[ -f "$combined_log" ]] && grep -qiE 'dpkg|apt-get|apt\.conf|broken packages|unmet dependencies|E: Sub-process|E: Failed' "$combined_log"; then
+        is_apt_issue=true
+      fi
+      ;;
+    esac
+
+    # Command not found detection
+    if [[ $install_exit_code -eq 127 ]]; then
+      is_cmd_not_found=true
+    fi
+
+    # Network-related detection (curl/apt/git fetch failures and transient network issues)
+    case "$install_exit_code" in
+    6 | 7 | 22 | 28 | 35 | 52 | 56 | 57 | 75 | 78) is_network_issue=true ;;
+    100)
+      # APT can fail due to network (Failed to fetch)
+      if [[ -f "$combined_log" ]] && grep -qiE 'Failed to fetch|Could not resolve|Connection failed|Network is unreachable|Temporary failure resolving' "$combined_log"; then
+        is_network_issue=true
+      fi
+      ;;
+    128)
+      if [[ -f "$combined_log" ]] && grep -qiE 'RPC failed|early EOF|fetch-pack|HTTP/2 stream|Could not resolve host|Temporary failure resolving|Failed to fetch|Connection reset|Network is unreachable' "$combined_log"; then
+        is_network_issue=true
+      fi
+      ;;
+    esac
+
+    # Exit 1 subclassification: analyze logs to identify actual root cause
+    # Many exit 1 errors are actually APT, OOM, network, or command-not-found issues
+    if [[ $install_exit_code -eq 1 && -f "$combined_log" ]]; then
+      if grep -qiE 'E: Unable to|E: Package|E: Failed to fetch|dpkg.*error|broken packages|unmet dependencies|dpkg --configure -a' "$combined_log"; then
+        is_apt_issue=true
+      fi
+      if grep -qiE 'Cannot allocate memory|Out of memory|oom-killer|Killed process|JavaScript heap' "$combined_log"; then
+        is_oom=true
+      fi
+      if grep -qiE 'Could not resolve|DNS|Connection refused|Network is unreachable|No route to host|Temporary failure resolving|Failed to fetch' "$combined_log"; then
+        is_network_issue=true
+      fi
+      if grep -qiE ': command not found|No such file or directory.*/s?bin/' "$combined_log"; then
+        is_cmd_not_found=true
+      fi
+    fi
+
+    # Show error explanation if available
+    if [[ -n "$error_explanation" ]]; then
+      echo -e "${TAB}${RD}Error: ${error_explanation}${CL}"
+      echo ""
+    fi
+
+    # Show specific hints for known error types
+    if [[ $install_exit_code -eq 10 ]]; then
+      echo -e "${TAB}${INFO} This error usually means the container needs ${GN}privileged${CL} mode or Docker/nesting support."
+      echo -e "${TAB}${INFO} Recreate with: Advanced Install → Container Type: ${GN}Privileged${CL}"
+      echo ""
+    fi
+
+    if [[ $install_exit_code -eq 125 || $install_exit_code -eq 126 ]]; then
+      echo -e "${TAB}${INFO} The command exists but cannot be executed. This may be a ${GN}permission${CL} issue."
+      echo -e "${TAB}${INFO} If using Docker, ensure the container is ${GN}privileged${CL} or has correct permissions."
+      echo ""
+    fi
+
+    if [[ "$is_cmd_not_found" == true ]]; then
+      local missing_cmd=""
+      if [[ -f "$combined_log" ]]; then
+        missing_cmd=$(grep -oiE '[a-zA-Z0-9_.-]+: command not found' "$combined_log" | tail -1 | sed 's/: command not found//' || true)
+      fi
+      if [[ -n "$missing_cmd" ]]; then
+        echo -e "${TAB}${INFO} Missing command: ${GN}${missing_cmd}${CL}"
+      fi
+      echo ""
+    fi
+
+    # Build recovery menu based on error type
+    echo -e "${YW}What would you like to do?${CL}"
+    echo ""
+    echo -e "  ${GN}1)${CL} Remove container and exit"
+    echo -e "  ${GN}2)${CL} Keep container for debugging"
+    echo -e "  ${GN}3)${CL} Retry with verbose mode (full rebuild)"
+
+    local next_option=4
+    local APT_OPTION="" OOM_OPTION="" DNS_OPTION=""
+
+    if [[ "$is_apt_issue" == true ]]; then
+      if [[ "$var_os" == "alpine" ]]; then
+        echo -e "  ${GN}${next_option})${CL} Repair APK state and re-run install (in-place)"
+      else
+        echo -e "  ${GN}${next_option})${CL} Repair APT/DPKG state and re-run install (in-place)"
+      fi
+      APT_OPTION=$next_option
+      next_option=$((next_option + 1))
+    fi
+
+    if [[ "$is_oom" == true ]]; then
+      local recovery_attempt="${RECOVERY_ATTEMPT:-0}"
+      if [[ $recovery_attempt -lt 2 ]]; then
+        local new_ram=$((RAM_SIZE * 2))
+        local new_cpu=$((CORE_COUNT * 2))
+        echo -e "  ${GN}${next_option})${CL} Retry with more resources (RAM: ${RAM_SIZE}→${new_ram} MiB, CPU: ${CORE_COUNT}→${new_cpu} cores)"
+        OOM_OPTION=$next_option
+        next_option=$((next_option + 1))
+      else
+        echo -e "  ${DGN}-)${CL} ${DGN}OOM retry exhausted (already retried ${recovery_attempt}x)${CL}"
+      fi
+    fi
+
+    if [[ "$is_network_issue" == true ]]; then
+      echo -e "  ${GN}${next_option})${CL} Retry with DNS override in LXC (8.8.8.8 / 1.1.1.1)"
+      DNS_OPTION=$next_option
+      next_option=$((next_option + 1))
+    fi
+
+    local max_option=$((next_option - 1))
+
+    echo ""
+    echo -en "${YW}Select option [1-${max_option}] (default: 1, auto-remove in 60s): ${CL}"
     if read -t 60 -r response; then
-      if [[ -z "$response" || "$response" =~ ^[Yy]$ ]]; then
+      case "${response:-1}" in
+      1)
         # Remove container
         echo -e "\n${TAB}${HOLD}${YW}Removing container ${CTID}${CL}"
         pct stop "$CTID" &>/dev/null || true
         pct destroy "$CTID" &>/dev/null || true
         echo -e "${BFR}${CM}${GN}Container ${CTID} removed${CL}"
-      elif [[ "$response" =~ ^[Nn]$ ]]; then
+        ;;
+      2)
         echo -e "\n${TAB}${YW}Container ${CTID} kept for debugging${CL}"
-
         # Dev mode: Setup MOTD/SSH for debugging access to broken container
         if [[ "${DEV_MODE_MOTD:-false}" == "true" ]]; then
           echo -e "${TAB}${HOLD}${DGN}Setting up MOTD and SSH for debugging...${CL}"
           if pct exec "$CTID" -- bash -c "
-            source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/install.func)
-            declare -f motd_ssh >/dev/null 2>&1 && motd_ssh || true
-          " >/dev/null 2>&1; then
+              source <(curl -fsSL "$COMMUNITY_SCRIPTS_URL/misc/install.func")
+              declare -f motd_ssh >/dev/null 2>&1 && motd_ssh || true
+            " >/dev/null 2>&1; then
             local ct_ip=$(pct exec "$CTID" ip a s dev eth0 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1)
             echo -e "${BFR}${CM}${GN}MOTD/SSH ready - SSH into container: ssh root@${ct_ip}${CL}"
           fi
         fi
-      fi
+        exit $install_exit_code
+        ;;
+      3)
+        # Retry with verbose mode
+        echo -e "\n${TAB}${HOLD}${YW}Removing container ${CTID} for rebuild...${CL}"
+        pct stop "$CTID" &>/dev/null || true
+        pct destroy "$CTID" &>/dev/null || true
+        echo -e "${BFR}${CM}${GN}Container ${CTID} removed${CL}"
+        echo ""
+        # Get new container ID
+        local old_ctid="$CTID"
+        export CTID=$(get_valid_container_id "$CTID")
+        export VERBOSE="yes"
+        export var_verbose="yes"
+
+        # Show rebuild summary
+        echo -e "${YW}Rebuilding with preserved settings:${CL}"
+        echo -e "  Container ID: ${old_ctid} → ${CTID}"
+        echo -e "  RAM: ${RAM_SIZE} MiB | CPU: ${CORE_COUNT} cores | Disk: ${DISK_SIZE} GB"
+        echo -e "  Network: ${NET:-dhcp} | Bridge: ${BRG:-vmbr0}"
+        echo -e "  Verbose: ${GN}enabled${CL}"
+        echo ""
+        msg_info "Restarting installation..."
+        # Re-run build_container
+        build_container
+        return $?
+        ;;
+      *)
+        # Handle dynamic smart recovery options via named option variables
+        local handled=false
+
+        if [[ -n "${APT_OPTION}" && "${response}" == "${APT_OPTION}" ]]; then
+          # Package manager in-place repair: fix broken state and re-run install script
+          handled=true
+          if [[ "$var_os" == "alpine" ]]; then
+            echo -e "\n${TAB}${HOLD}${YW}Repairing APK state in container ${CTID}...${CL}"
+            pct exec "$CTID" -- ash -c "
+              apk fix 2>/dev/null || true
+              apk cache clean 2>/dev/null || true
+              apk update 2>/dev/null || true
+            " >/dev/null 2>&1 || true
+            echo -e "${BFR}${CM}${GN}APK state repaired in container ${CTID}${CL}"
+          else
+            echo -e "\n${TAB}${HOLD}${YW}Repairing APT/DPKG state in container ${CTID}...${CL}"
+            pct exec "$CTID" -- bash -c "
+              DEBIAN_FRONTEND=noninteractive dpkg --configure -a 2>/dev/null || true
+              apt-get -f install -y 2>/dev/null || true
+              apt-get clean 2>/dev/null
+              apt-get update 2>/dev/null || true
+            " >/dev/null 2>&1 || true
+            echo -e "${BFR}${CM}${GN}APT/DPKG state repaired in container ${CTID}${CL}"
+          fi
+          echo ""
+          export VERBOSE="yes"
+          export var_verbose="yes"
+
+          echo -e "${YW}Re-running installation in existing container ${CTID}:${CL}"
+          echo -e "  RAM: ${RAM_SIZE} MiB | CPU: ${CORE_COUNT} cores | Disk: ${DISK_SIZE} GB"
+          echo -e "  Verbose: ${GN}enabled${CL}"
+          echo ""
+          msg_info "Re-running installation script..."
+
+          # Re-run install script in existing container (don't destroy/recreate)
+          set +Eeuo pipefail
+          trap - ERR
+          local _LXC_CAPTURE_LOG="/tmp/.install-capture-${SESSION_ID}.log"
+          local _install_script
+          _install_script="$(curl -fsSL "https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main/install/${var_install}.sh")"
+          lxc-attach -n "$CTID" -- bash -c "$_install_script" 2>&1 | tee "$_LXC_CAPTURE_LOG"
+          local apt_retry_exit=${PIPESTATUS[0]}
+          set -Eeuo pipefail
+          trap 'error_handler' ERR
+
+          # Check for error flag from retry
+          local apt_retry_code=0
+          if [[ -n "${SESSION_ID:-}" ]]; then
+            local retry_error_flag="/root/.install-${SESSION_ID}.failed"
+            if pct exec "$CTID" -- test -f "$retry_error_flag" 2>/dev/null; then
+              apt_retry_code=$(pct exec "$CTID" -- cat "$retry_error_flag" 2>/dev/null || echo "1")
+              pct exec "$CTID" -- rm -f "$retry_error_flag" 2>/dev/null || true
+            fi
+          fi
+
+          if [[ $apt_retry_code -eq 0 && $apt_retry_exit -ne 0 ]]; then
+            apt_retry_code=$apt_retry_exit
+          fi
+
+          if [[ $apt_retry_code -eq 0 ]]; then
+            msg_ok "Installation completed successfully after APT repair!"
+            post_update_to_api "done" "0" "force"
+            return 0
+          else
+            msg_error "Installation still failed after APT repair (exit code: ${apt_retry_code})"
+            install_exit_code=$apt_retry_code
+          fi
+        fi
+
+        if [[ -n "${OOM_OPTION}" && "${response}" == "${OOM_OPTION}" ]]; then
+          # Retry with doubled resources
+          handled=true
+          echo -e "\n${TAB}${HOLD}${YW}Removing container ${CTID} for rebuild with more resources...${CL}"
+          pct stop "$CTID" &>/dev/null || true
+          pct destroy "$CTID" &>/dev/null || true
+          echo -e "${BFR}${CM}${GN}Container ${CTID} removed${CL}"
+          echo ""
+
+          local old_ctid="$CTID"
+          local old_ram="$RAM_SIZE"
+          local old_cpu="$CORE_COUNT"
+          export CTID=$(get_valid_container_id "$CTID")
+          export RAM_SIZE=$((RAM_SIZE * 2))
+          export CORE_COUNT=$((CORE_COUNT * 2))
+          export var_ram="$RAM_SIZE"
+          export var_cpu="$CORE_COUNT"
+          export VERBOSE="yes"
+          export var_verbose="yes"
+          export RECOVERY_ATTEMPT=$((${RECOVERY_ATTEMPT:-0} + 1))
+
+          echo -e "${YW}Rebuilding with increased resources (attempt ${RECOVERY_ATTEMPT}/2):${CL}"
+          echo -e "  Container ID: ${old_ctid} → ${CTID}"
+          echo -e "  RAM: ${old_ram} → ${GN}${RAM_SIZE}${CL} MiB (x2)"
+          echo -e "  CPU: ${old_cpu} → ${GN}${CORE_COUNT}${CL} cores (x2)"
+          echo -e "  Disk: ${DISK_SIZE} GB | Network: ${NET:-dhcp} | Bridge: ${BRG:-vmbr0}"
+          echo -e "  Verbose: ${GN}enabled${CL}"
+          echo ""
+          msg_info "Restarting installation..."
+
+          build_container
+          return $?
+        fi
+
+        if [[ -n "${DNS_OPTION}" && "${response}" == "${DNS_OPTION}" ]]; then
+          # Retry with DNS override in LXC
+          handled=true
+          echo -e "\n${TAB}${HOLD}${YW}Removing container ${CTID} for rebuild with DNS override...${CL}"
+          pct stop "$CTID" &>/dev/null || true
+          pct destroy "$CTID" &>/dev/null || true
+          echo -e "${BFR}${CM}${GN}Container ${CTID} removed${CL}"
+          echo ""
+          local old_ctid="$CTID"
+          export CTID=$(get_valid_container_id "$CTID")
+          export DNS_RETRY_OVERRIDE="true"
+          export VERBOSE="yes"
+          export var_verbose="yes"
+
+          echo -e "${YW}Rebuilding with DNS override in LXC:${CL}"
+          echo -e "  Container ID: ${old_ctid} → ${CTID}"
+          echo -e "  DNS: ${GN}8.8.8.8, 1.1.1.1${CL} (inside LXC only)"
+          echo -e "  Verbose: ${GN}enabled${CL}"
+          echo ""
+          msg_info "Restarting installation..."
+          build_container
+          return $?
+        fi
+
+        if [[ "$handled" == false ]]; then
+          echo -e "\n${TAB}${YW}Invalid option. Container ${CTID} kept.${CL}"
+          exit $install_exit_code
+        fi
+        ;;
+
+      esac
     else
       # Timeout - auto-remove
-      echo -e "\n${YW}No response - auto-removing container${CL}"
-      echo -e "${TAB}${HOLD}${YW}Removing container ${CTID}${CL}"
+      echo ""
+      msg_info "No response - removing container ${CTID}"
+
       pct stop "$CTID" &>/dev/null || true
       pct destroy "$CTID" &>/dev/null || true
-      echo -e "${BFR}${CM}${GN}Container ${CTID} removed${CL}"
+      msg_ok "Container ${CTID} removed"
     fi
+
+    # Force one final status update attempt after cleanup
+    # This ensures status is updated even if the first attempt failed (e.g., HTTP 400)
+    post_update_to_api "failed" "$install_exit_code" "force"
 
     exit $install_exit_code
   fi
+
+  # Clean up host-side capture log (not needed on success, already in combined_log on failure)
+  rm -f "/tmp/.install-capture-${SESSION_ID}.log" 2>/dev/null
+
+  # Re-enable error handling after successful install or recovery menu completion
+  set -Eeuo pipefail
+  trap 'error_handler' ERR
 }
 
 destroy_lxc() {
@@ -4100,12 +5326,12 @@ destroy_lxc() {
     return 1
   fi
 
-  # Abbruch bei Ctrl-C / Ctrl-D / ESC
+  # Abort on Ctrl-C / Ctrl-D / ESC
   trap 'echo; msg_error "Aborted by user (SIGINT/SIGQUIT)"; return 130' INT QUIT
 
   local prompt
   if ! read -rp "Remove this Container? <y/N> " prompt; then
-    # read gibt != 0 zurück bei Ctrl-D/ESC
+    # read returns non-zero on Ctrl-D/ESC
     msg_error "Aborted input (Ctrl-D/ESC)"
     return 130
   fi
@@ -4131,7 +5357,6 @@ destroy_lxc() {
 # ------------------------------------------------------------------------------
 # Storage discovery / selection helpers
 # ------------------------------------------------------------------------------
-# ===== Storage discovery / selection helpers (ported from create_lxc.sh) =====
 resolve_storage_preselect() {
   local class="$1" preselect="$2" required_content=""
   case "$class" in
@@ -4207,15 +5432,14 @@ fix_gpu_gids() {
 
   # For privileged containers: also fix permissions inside container
   if [[ "$CT_TYPE" == "0" ]]; then
-    pct exec "$CTID" -- bash -c "
+    pct exec "$CTID" -- sh -c "
       if [ -d /dev/dri ]; then
         for dev in /dev/dri/*; do
           if [ -e \"\$dev\" ]; then
-            if [[ \"\$dev\" =~ renderD ]]; then
-              chgrp ${render_gid} \"\$dev\" 2>/dev/null || true
-            else
-              chgrp ${video_gid} \"\$dev\" 2>/dev/null || true
-            fi
+            case \"\$dev\" in
+              *renderD*) chgrp ${render_gid} \"\$dev\" 2>/dev/null || true ;;
+              *)         chgrp ${video_gid} \"\$dev\" 2>/dev/null || true ;;
+            esac
             chmod 660 \"\$dev\" 2>/dev/null || true
           fi
         done
@@ -4290,18 +5514,13 @@ select_storage() {
   if [[ $((${#MENU[@]} / 3)) -eq 1 ]]; then
     STORAGE_RESULT="${STORAGE_MAP[${MENU[0]}]}"
     STORAGE_INFO="${MENU[1]}"
-
-    # Validate storage space for auto-picked container storage
-    if [[ "$CLASS" == "container" && -n "${DISK_SIZE:-}" ]]; then
-      validate_storage_space "$STORAGE_RESULT" "$DISK_SIZE" "yes"
-    fi
     return 0
   fi
 
   local WIDTH=$((COL_WIDTH + 42))
   while true; do
     local DISPLAY_SELECTED
-    DISPLAY_SELECTED=$(whiptail --backtitle "[dev] Proxmox VE Helper Scripts" \
+    DISPLAY_SELECTED=$(whiptail --backtitle "Proxmox VE Helper Scripts" \
       --title "Storage Pools" \
       --radiolist "Which storage pool for ${CONTENT_LABEL,,}?\n(Spacebar to select)" \
       16 "$WIDTH" 6 "${MENU[@]}" 3>&1 1>&2 2>&3) || { exit_script; }
@@ -4322,7 +5541,9 @@ select_storage() {
     # Validate storage space for container storage
     if [[ "$CLASS" == "container" && -n "${DISK_SIZE:-}" ]]; then
       validate_storage_space "$STORAGE_RESULT" "$DISK_SIZE" "yes"
+      # Continue even if validation fails - user was warned
     fi
+
     return 0
   done
 }
@@ -4385,6 +5606,18 @@ validate_storage_space() {
   return 0
 }
 
+# ==============================================================================
+# SECTION 8: CONTAINER CREATION
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# create_lxc_container()
+#
+# - Main function for creating LXC containers
+# - Handles all phases: validation, template discovery, container creation,
+#   network config, storage, etc.
+# - Extensive error checking with detailed exit codes
+# ------------------------------------------------------------------------------
 create_lxc_container() {
   # ------------------------------------------------------------------------------
   # Optional verbose mode (debug tracing)
@@ -4435,9 +5668,7 @@ create_lxc_container() {
     echo "  pve-container: installed=${_pvec_i:-n/a}  candidate=${_pvec_c:-n/a}"
     echo "  lxc-pve     : installed=${_lxcp_i:-n/a}  candidate=${_lxcp_c:-n/a}"
     echo
-    read -rp "Do you want to upgrade now? [y/N] " _ans
-    case "${_ans,,}" in
-    y | yes)
+    if prompt_confirm "Do you want to upgrade now?" "n" 60; then
       msg_info "Upgrading Proxmox LXC stack (pve-container, lxc-pve)"
       if $STD apt-get update && $STD apt-get install -y --only-upgrade pve-container lxc-pve; then
         msg_ok "LXC stack upgraded."
@@ -4456,9 +5687,75 @@ create_lxc_container() {
         msg_error "Upgrade failed. Please check APT output."
         return 3
       fi
-      ;;
-    *) return 2 ;;
+    else
+      return 2
+    fi
+  }
+
+  ARCH="$(dpkg --print-architecture)"
+
+  # Maps OS type + version to the release variant name used by ARM64 template sources.
+  arm64_template_variant() {
+    case "$1:$2" in
+      debian:12) echo "bookworm" ;;
+      debian:13) echo "trixie" ;;
+      debian:) echo "$DEBIAN_DEFAULT_CODENAME" ;;
+
+      ubuntu:24.04) echo "noble" ;;
+      ubuntu:26.04) echo "questing" ;;
+      ubuntu:) echo "$UBUNTU_DEFAULT_CODENAME" ;;
+
+      alpine:*) echo "${2:-$ALPINE_DEFAULT_VERSION}" ;;
+
+      *) return 1 ;;
     esac
+  }
+
+  # Downloads an ARM64 LXC rootfs template to $1.
+  # Debian: fetches latest release from community-scripts/debian-arm64-lxc on GitHub.
+  # Others: fetches from jenkins.linuxcontainers.org.
+  download_arm64_template() {
+    local dest="$1" url
+
+    mkdir -p "$(dirname "$dest")" || {
+      msg_error "Cannot create template dir."
+      exit 207
+    }
+
+    if [[ "$PCT_OSTYPE" == "debian" ]]; then
+      url=$(
+        curl -fsSL "https://api.github.com/repos/community-scripts/debian-arm64-lxc/releases/latest" |
+          jq -r --arg v "$CUSTOM_TEMPLATE_VARIANT" \
+            '.assets[].browser_download_url | select(test("debian-" + $v + "-arm64-rootfs\\.tar\\.xz$"))' |
+          head -n1
+      )
+
+      [[ -n "$url" ]] || {
+        msg_error "Could not find Debian ${CUSTOM_TEMPLATE_VARIANT} ARM64 template URL."
+        exit 207
+      }
+    else
+      url="https://jenkins.linuxcontainers.org/job/image-${PCT_OSTYPE}/architecture=arm64,release=${CUSTOM_TEMPLATE_VARIANT},variant=default/lastStableBuild/artifact/rootfs.tar.xz"
+    fi
+
+    msg_info "Downloading ${PCT_OSTYPE^} ${CUSTOM_TEMPLATE_VARIANT} ARM64 template"
+    if ! curl -fsSL -o "$dest" "$url"; then
+      msg_error "Failed to download ARM64 template from: $url"
+      exit 208
+    fi
+    msg_ok "Downloaded ARM64 LXC template"
+  }
+
+  download_template() {
+    local dest="${1:-$TEMPLATE_PATH}"
+    if [[ "$ARCH" == "arm64" ]]; then
+      download_arm64_template "$dest"
+    else
+      pveam download "$TEMPLATE_STORAGE" "$TEMPLATE" >>"${BUILD_LOG:-/dev/null}" 2>&1 || {
+        msg_error "Failed to download template '$TEMPLATE' to storage '$TEMPLATE_STORAGE'"
+        exit 222
+      }
+    fi
   }
 
   # ------------------------------------------------------------------------------
@@ -4489,6 +5786,11 @@ create_lxc_container() {
     exit 206
   fi
 
+  # Report installation start to API early - captures failures in storage/template/create
+  post_to_api
+
+  # Transition to 'validation' — Proxmox-internal checks (storage, template, cluster)
+  post_progress_to_api "validation"
   # Storage capability check
   check_storage_support "rootdir" || {
     msg_error "No valid storage found for 'rootdir' [Container]"
@@ -4556,14 +5858,6 @@ create_lxc_container() {
   fi
   msg_ok "Template storage '$TEMPLATE_STORAGE' validated"
 
-  # Free space check
-  STORAGE_FREE=$(pvesm status | awk -v s="$CONTAINER_STORAGE" '$1 == s { print $6 }')
-  REQUIRED_KB=$((${PCT_DISK_SIZE:-8} * 1024 * 1024))
-  [[ "$STORAGE_FREE" -ge "$REQUIRED_KB" ]] || {
-    msg_error "Not enough space on '$CONTAINER_STORAGE'. Needed: ${PCT_DISK_SIZE:-8}G."
-    exit 214
-  }
-
   # Cluster quorum (if cluster)
   if [[ -f /etc/pve/corosync.conf ]]; then
     msg_info "Checking cluster quorum"
@@ -4576,208 +5870,194 @@ create_lxc_container() {
 
   # ------------------------------------------------------------------------------
   # Template discovery & validation
-  # Supported OS types (pveam available): alpine, almalinux, centos, debian,
-  #   devuan, fedora, gentoo, openeuler, opensuse, rockylinux, ubuntu
-  # Template naming conventions:
-  #   - Debian/Ubuntu/Devuan: <os>-<version>-standard_<date>_<arch>.tar.zst
-  #   - Alpine/Fedora/Rocky/CentOS/AlmaLinux/openEuler: <os>-<version>-default_<date>_<arch>.tar.xz
-  #   - Gentoo: gentoo-current-openrc_<date>_<arch>.tar.xz (note: underscore before date!)
-  #   - openSUSE: opensuse-<version>-default_<date>_<arch>.tar.xz
-  #   - CentOS: centos-<version>-stream-default_<date>_<arch>.tar.xz (note: stream in name)
   # ------------------------------------------------------------------------------
-  TEMPLATE_SEARCH="${PCT_OSTYPE}-${PCT_OSVERSION:-}"
-  case "$PCT_OSTYPE" in
-  debian | ubuntu | devuan) TEMPLATE_PATTERN="-standard_" ;;
-  alpine | fedora | rockylinux | almalinux | openeuler) TEMPLATE_PATTERN="-default_" ;;
-  centos) TEMPLATE_PATTERN="-stream-default_" ;;
-  gentoo) TEMPLATE_PATTERN="-openrc_" ;; # Pattern: gentoo-current-openrc_<date> (underscore!)
-  opensuse) TEMPLATE_PATTERN="-default_" ;;
-  *) TEMPLATE_PATTERN="" ;;
-  esac
+  CUSTOM_TEMPLATE_VARIANT=""
 
-  msg_info "Searching for template '$TEMPLATE_SEARCH'"
+  if [[ "$ARCH" == "arm64" ]]; then
+    # ARM64: use custom template download from linuxcontainers.org / GitHub
+    msg_info "Preparing ARM64 template"
 
-  # Build regex patterns outside awk/grep for clarity
-  SEARCH_PATTERN="^${TEMPLATE_SEARCH}"
+    CUSTOM_TEMPLATE_VARIANT=$(arm64_template_variant "$PCT_OSTYPE" "${PCT_OSVERSION:-}") || {
+      msg_error "No ARM64 template mapping for ${PCT_OSTYPE} ${PCT_OSVERSION:-latest}"
+      exit 207
+    }
 
-  #echo "[DEBUG] TEMPLATE_SEARCH='$TEMPLATE_SEARCH'"
-  #echo "[DEBUG] SEARCH_PATTERN='$SEARCH_PATTERN'"
-  #echo "[DEBUG] TEMPLATE_PATTERN='$TEMPLATE_PATTERN'"
+    TEMPLATE="${PCT_OSTYPE}-${CUSTOM_TEMPLATE_VARIANT}-rootfs.tar.xz"
+    TEMPLATE_SOURCE="custom-arm64"
 
-  mapfile -t LOCAL_TEMPLATES < <(
-    pveam list "$TEMPLATE_STORAGE" 2>/dev/null |
-      awk -v search="${SEARCH_PATTERN}" -v pattern="${TEMPLATE_PATTERN}" '$1 ~ search && $1 ~ pattern {print $1}' |
-      sed 's|.*/||' | sort -t - -k 2 -V
-  )
-
-  # Update template catalog with timeout to prevent hangs on slow networks
-  if command -v timeout &>/dev/null; then
-    if ! timeout 30 pveam update >/dev/null 2>&1; then
-      msg_warn "Template catalog update timed out or failed (continuing with cached data)"
+    # Resolve template path
+    TEMPLATE_PATH="$(pvesm path "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" 2>/dev/null || true)"
+    if [[ -z "$TEMPLATE_PATH" ]]; then
+      local _tpl_base
+      _tpl_base=$(awk -v s="$TEMPLATE_STORAGE" '
+        $0 ~ "^[^:]+:[[:space:]]*" s "$" {f=1; next}
+        f && /^[^[:space:]]/ {f=0}
+        f && $1 == "path" {print $2; exit}
+      ' /etc/pve/storage.cfg)
+      TEMPLATE_PATH="${_tpl_base:-/var/lib/vz}/template/cache/$TEMPLATE"
     fi
-  else
-    pveam update >/dev/null 2>&1 || msg_warn "Could not update template catalog (pveam update failed)."
-  fi
 
-  msg_ok "Template search completed"
-
-  #echo "[DEBUG] pveam available output (first 5 lines with .tar files):"
-  #pveam available -section system 2>/dev/null | grep -E '\.(tar\.zst|tar\.xz|tar\.gz)$' | head -5 | sed 's/^/  /'
-
-  set +u
-  mapfile -t ONLINE_TEMPLATES < <(pveam available -section system 2>/dev/null | grep -E '\.(tar\.zst|tar\.xz|tar\.gz)$' | awk '{print $2}' | grep -E "${SEARCH_PATTERN}.*${TEMPLATE_PATTERN}" | sort -t - -k 2 -V 2>/dev/null || true)
-  #echo "[DEBUG] After filtering: ${#ONLINE_TEMPLATES[@]} online templates found"
-  set -u
-
-  ONLINE_TEMPLATE=""
-  [[ ${#ONLINE_TEMPLATES[@]} -gt 0 ]] && ONLINE_TEMPLATE="${ONLINE_TEMPLATES[-1]}"
-
-  #msg_debug "SEARCH_PATTERN='${SEARCH_PATTERN}' TEMPLATE_PATTERN='${TEMPLATE_PATTERN}'"
-  #msg_debug "Found ${#LOCAL_TEMPLATES[@]} local templates, ${#ONLINE_TEMPLATES[@]} online templates"
-  if [[ ${#ONLINE_TEMPLATES[@]} -gt 0 ]]; then
-    #msg_debug "First 3 online templates:"
-    count=0
-    for idx in "${!ONLINE_TEMPLATES[@]}"; do
-      #msg_debug "  [$idx]: ${ONLINE_TEMPLATES[$idx]}"
-      ((count++))
-      [[ $count -ge 3 ]] && break
-    done
-  fi
-  #msg_debug "ONLINE_TEMPLATE='$ONLINE_TEMPLATE'"
-
-  if [[ ${#LOCAL_TEMPLATES[@]} -gt 0 ]]; then
-    TEMPLATE="${LOCAL_TEMPLATES[-1]}"
-    TEMPLATE_SOURCE="local"
-  else
-    TEMPLATE="$ONLINE_TEMPLATE"
-    TEMPLATE_SOURCE="online"
-  fi
-
-  # If still no template, try to find alternatives
-  if [[ -z "$TEMPLATE" ]]; then
-    echo ""
-    echo "[DEBUG] No template found for ${PCT_OSTYPE} ${PCT_OSVERSION}, searching for alternatives..."
-
-    # Get all available versions for this OS type
-    # Special handling for Gentoo which uses 'current' instead of numeric version
-    if [[ "$PCT_OSTYPE" == "gentoo" ]]; then
-      mapfile -t AVAILABLE_VERSIONS < <(
-        pveam available -section system 2>/dev/null |
-          grep -E '\.(tar\.zst|tar\.xz|tar\.gz)$' |
-          awk '{print $2}' |
-          grep "^gentoo-" |
-          sed -E 's/gentoo-([^-]+)-.*/\1/' |
-          sort -u 2>/dev/null || sort -u
-      )
+    # Download if missing, too small, or corrupt
+    if [[ ! -f "$TEMPLATE_PATH" ]]; then
+      download_arm64_template "$TEMPLATE_PATH"
+    elif [[ "$(stat -c%s "$TEMPLATE_PATH")" -lt 1000000 ]] || ! tar -tf "$TEMPLATE_PATH" &>/dev/null; then
+      msg_warn "Local template invalid - re-downloading."
+      rm -f "$TEMPLATE_PATH"
+      download_arm64_template "$TEMPLATE_PATH"
     else
-      mapfile -t AVAILABLE_VERSIONS < <(
-        pveam available -section system 2>/dev/null |
-          grep -E '\.(tar\.zst|tar\.xz|tar\.gz)$' |
-          awk '{print $2}' |
-          grep "^${PCT_OSTYPE}-" |
-          sed -E "s/${PCT_OSTYPE}-([0-9]+(\.[0-9]+)?).*/\1/" |
-          grep -E '^[0-9]' |
-          sort -u -V 2>/dev/null || sort -u
-      )
+      msg_ok "Template ${BL}$TEMPLATE${CL} found locally."
     fi
 
-    if [[ ${#AVAILABLE_VERSIONS[@]} -gt 0 ]]; then
-      echo ""
-      echo "${BL}Available ${PCT_OSTYPE} versions:${CL}"
-      for i in "${!AVAILABLE_VERSIONS[@]}"; do
-        echo "  [$((i + 1))] ${AVAILABLE_VERSIONS[$i]}"
-      done
-      echo ""
-      read -p "Select version [1-${#AVAILABLE_VERSIONS[@]}] or press Enter to cancel: " choice
+  else
+    TEMPLATE_SEARCH="${PCT_OSTYPE}-${PCT_OSVERSION:-}"
+    case "$PCT_OSTYPE" in
+    debian | ubuntu) TEMPLATE_PATTERN="-standard_" ;;
+    alpine | fedora | rocky | centos) TEMPLATE_PATTERN="-default_" ;;
+    *) TEMPLATE_PATTERN="" ;;
+    esac
 
-      if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le ${#AVAILABLE_VERSIONS[@]} ]]; then
-        PCT_OSVERSION="${AVAILABLE_VERSIONS[$((choice - 1))]}"
-        TEMPLATE_SEARCH="${PCT_OSTYPE}-${PCT_OSVERSION}"
-        SEARCH_PATTERN="^${TEMPLATE_SEARCH}-"
+    msg_info "Searching for template '$TEMPLATE_SEARCH'"
 
-        #echo "[DEBUG] Retrying with version: $PCT_OSVERSION"
+    # Initialize variables
+    ONLINE_TEMPLATE=""
+    ONLINE_TEMPLATES=()
 
-        mapfile -t ONLINE_TEMPLATES < <(
-          pveam available -section system 2>/dev/null |
-            grep -E '\.(tar\.zst|tar\.xz|tar\.gz)$' |
-            awk -F'\t' '{print $1}' |
-            grep -E "${SEARCH_PATTERN}.*${TEMPLATE_PATTERN}" |
-            sort -t - -k 2 -V 2>/dev/null || true
-        )
+    # Step 1: Check local templates first (instant)
+    mapfile -t LOCAL_TEMPLATES < <(
+      pveam list "$TEMPLATE_STORAGE" 2>/dev/null |
+        awk -v search="${TEMPLATE_SEARCH}" -v pattern="${TEMPLATE_PATTERN}" '$1 ~ search && $1 ~ pattern {print $1}' |
+        sed 's|.*/||' | sort -t - -k 2 -V
+    )
 
-        if [[ ${#ONLINE_TEMPLATES[@]} -gt 0 ]]; then
-          TEMPLATE="${ONLINE_TEMPLATES[-1]}"
-          TEMPLATE_SOURCE="online"
-          #echo "[DEBUG] Found alternative: $TEMPLATE"
-        else
-          msg_error "No templates available for ${PCT_OSTYPE} ${PCT_OSVERSION}"
-          exit 225
+    # Step 2: If local template found, use it immediately (skip pveam update)
+    if [[ ${#LOCAL_TEMPLATES[@]} -gt 0 ]]; then
+      TEMPLATE="${LOCAL_TEMPLATES[-1]}"
+      TEMPLATE_SOURCE="local"
+      msg_ok "Template search completed"
+    else
+      # Step 3: No local template - need to check online (this may be slow)
+      msg_info "No local template found, checking online catalog..."
+
+      # Update catalog with timeout to prevent long hangs
+      if command -v timeout &>/dev/null; then
+        if ! timeout 30 pveam update >/dev/null 2>&1; then
+          msg_warn "Template catalog update timed out (possible network/DNS issue). Run 'pveam update' manually to diagnose."
         fi
       else
-        msg_custom "🚫" "${YW}" "Installation cancelled"
-        exit 0
+        pveam update >/dev/null 2>&1 || msg_warn "Could not update template catalog (pveam update failed)"
       fi
-    else
-      msg_error "No ${PCT_OSTYPE} templates available at all"
-      exit 225
+
+      ONLINE_TEMPLATES=()
+      mapfile -t ONLINE_TEMPLATES < <(pveam available -section system 2>/dev/null | grep -E '\.(tar\.zst|tar\.xz|tar\.gz)$' | awk '{print $2}' | grep -E "^${TEMPLATE_SEARCH}.*${TEMPLATE_PATTERN}" | sort -t - -k 2 -V 2>/dev/null || true)
+      [[ ${#ONLINE_TEMPLATES[@]} -gt 0 ]] && ONLINE_TEMPLATE="${ONLINE_TEMPLATES[-1]}"
+
+      TEMPLATE="$ONLINE_TEMPLATE"
+      TEMPLATE_SOURCE="online"
+      msg_ok "Template search completed"
     fi
-  fi
 
-  #echo "[DEBUG] Selected TEMPLATE='$TEMPLATE' SOURCE='$TEMPLATE_SOURCE'"
-  #msg_debug "Selected TEMPLATE='$TEMPLATE' SOURCE='$TEMPLATE_SOURCE'"
-
-  TEMPLATE_PATH="$(pvesm path $TEMPLATE_STORAGE:vztmpl/$TEMPLATE 2>/dev/null || true)"
-  if [[ -z "$TEMPLATE_PATH" ]]; then
-    TEMPLATE_BASE=$(awk -v s="$TEMPLATE_STORAGE" '$1==s {f=1} f && /path/ {print $2; exit}' /etc/pve/storage.cfg)
-    [[ -n "$TEMPLATE_BASE" ]] && TEMPLATE_PATH="$TEMPLATE_BASE/template/cache/$TEMPLATE"
-  fi
-
-  # If we still don't have a path but have a valid template name, construct it
-  if [[ -z "$TEMPLATE_PATH" && -n "$TEMPLATE" ]]; then
-    TEMPLATE_PATH="/var/lib/vz/template/cache/$TEMPLATE"
-  fi
-
-  [[ -n "$TEMPLATE_PATH" ]] || {
+    # If still no template, try to find alternatives
     if [[ -z "$TEMPLATE" ]]; then
-      msg_error "Template ${PCT_OSTYPE} ${PCT_OSVERSION} not available"
+      echo ""
+      echo "[DEBUG] No template found for ${PCT_OSTYPE} ${PCT_OSVERSION}, searching for alternatives..."
 
-      # Get available versions
+      # Get all available versions for this OS type
+      AVAILABLE_VERSIONS=()
       mapfile -t AVAILABLE_VERSIONS < <(
         pveam available -section system 2>/dev/null |
+          grep -E '\.(tar\.zst|tar\.xz|tar\.gz)$' |
+          awk -F'\t' '{print $1}' |
           grep "^${PCT_OSTYPE}-" |
-          sed -E 's/.*'"${PCT_OSTYPE}"'-([0-9]+\.[0-9]+).*/\1/' |
-          grep -E '^[0-9]+\.[0-9]+$' |
-          sort -u -V 2>/dev/null || sort -u
+          sed -E "s/.*${PCT_OSTYPE}-([0-9]+(\.[0-9]+)?).*/\1/" |
+          sort -u -V 2>/dev/null
       )
 
       if [[ ${#AVAILABLE_VERSIONS[@]} -gt 0 ]]; then
-        echo -e "\n${BL}Available versions:${CL}"
+        echo ""
+        echo "${BL}Available ${PCT_OSTYPE} versions:${CL}"
         for i in "${!AVAILABLE_VERSIONS[@]}"; do
           echo "  [$((i + 1))] ${AVAILABLE_VERSIONS[$i]}"
         done
-
         echo ""
-        read -p "Select version [1-${#AVAILABLE_VERSIONS[@]}] or Enter to exit: " choice
+        read -p "Select version [1-${#AVAILABLE_VERSIONS[@]}] or press Enter to cancel: " choice
 
         if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le ${#AVAILABLE_VERSIONS[@]} ]]; then
-          export var_version="${AVAILABLE_VERSIONS[$((choice - 1))]}"
+          PCT_OSVERSION="${AVAILABLE_VERSIONS[$((choice - 1))]}"
+          TEMPLATE_SEARCH="${PCT_OSTYPE}-${PCT_OSVERSION}"
+
+          ONLINE_TEMPLATES=()
+          mapfile -t ONLINE_TEMPLATES < <(
+            pveam available -section system 2>/dev/null |
+              grep -E '\.(tar\.zst|tar\.xz|tar\.gz)$' |
+              awk '{print $2}' |
+              grep -E "^${TEMPLATE_SEARCH}-.*${TEMPLATE_PATTERN}" |
+              sort -t - -k 2 -V 2>/dev/null || true
+          )
+
+          if [[ ${#ONLINE_TEMPLATES[@]} -gt 0 ]]; then
+            TEMPLATE="${ONLINE_TEMPLATES[-1]}"
+            TEMPLATE_SOURCE="online"
+          else
+            msg_error "No templates available for ${PCT_OSTYPE} ${PCT_OSVERSION}"
+            exit 225
+          fi
+        else
+          msg_custom "🚫" "${YW}" "Installation cancelled"
+          exit 0
+        fi
+      else
+        msg_error "No ${PCT_OSTYPE} templates available at all"
+        exit 225
+      fi
+    fi
+
+    TEMPLATE_PATH="$(pvesm path $TEMPLATE_STORAGE:vztmpl/$TEMPLATE 2>/dev/null || true)"
+    if [[ -z "$TEMPLATE_PATH" ]]; then
+      TEMPLATE_BASE=$(awk -v s="$TEMPLATE_STORAGE" '$1==s {f=1} f && /path/ {print $2; exit}' /etc/pve/storage.cfg)
+      [[ -n "$TEMPLATE_BASE" ]] && TEMPLATE_PATH="$TEMPLATE_BASE/template/cache/$TEMPLATE"
+    fi
+
+    # If we still don't have a path but have a valid template name, construct it
+    if [[ -z "$TEMPLATE_PATH" && -n "$TEMPLATE" ]]; then
+      TEMPLATE_PATH="/var/lib/vz/template/cache/$TEMPLATE"
+    fi
+
+    [[ -n "$TEMPLATE_PATH" ]] || {
+      if [[ -z "$TEMPLATE" ]]; then
+        msg_error "Template ${PCT_OSTYPE} ${PCT_OSVERSION} not available"
+
+        # Get available versions
+        mapfile -t AVAILABLE_VERSIONS < <(
+          pveam available -section system 2>/dev/null |
+            grep "^${PCT_OSTYPE}-" |
+            sed -E 's/.*'"${PCT_OSTYPE}"'-([0-9]+\.[0-9]+).*/\1/' |
+            grep -E '^[0-9]+\.[0-9]+$' |
+            sort -u -V 2>/dev/null || sort -u
+        )
+
+        if [[ ${#AVAILABLE_VERSIONS[@]} -gt 0 ]]; then
+          # Use prompt_select for version selection (supports unattended mode)
+          local selected_version
+          selected_version=$(prompt_select "Select ${PCT_OSTYPE} version:" 1 60 "${AVAILABLE_VERSIONS[@]}")
+
+          # prompt_select always returns a value (uses default in unattended mode)
+          export var_version="$selected_version"
           export PCT_OSVERSION="$var_version"
           msg_ok "Switched to ${PCT_OSTYPE} ${var_version}"
 
           # Retry template search with new version
           TEMPLATE_SEARCH="${PCT_OSTYPE}-${PCT_OSVERSION:-}"
-          SEARCH_PATTERN="^${TEMPLATE_SEARCH}-"
 
           mapfile -t LOCAL_TEMPLATES < <(
             pveam list "$TEMPLATE_STORAGE" 2>/dev/null |
-              awk -v search="${SEARCH_PATTERN}" -v pattern="${TEMPLATE_PATTERN}" '$1 ~ search && $1 ~ pattern {print $1}' |
+              awk -v search="${TEMPLATE_SEARCH}-" -v pattern="${TEMPLATE_PATTERN}" '$1 ~ search && $1 ~ pattern {print $1}' |
               sed 's|.*/||' | sort -t - -k 2 -V
           )
           mapfile -t ONLINE_TEMPLATES < <(
             pveam available -section system 2>/dev/null |
               grep -E '\.(tar\.zst|tar\.xz|tar\.gz)$' |
-              awk -F'\t' '{print $1}' |
-              grep -E "${SEARCH_PATTERN}.*${TEMPLATE_PATTERN}" |
+              awk '{print $2}' |
+              grep -E "^${TEMPLATE_SEARCH}-.*${TEMPLATE_PATTERN}" |
               sort -t - -k 2 -V 2>/dev/null || true
           )
           ONLINE_TEMPLATE=""
@@ -4807,82 +6087,79 @@ create_lxc_container() {
             exit 220
           }
         else
-          msg_custom "🚫" "${YW}" "Installation cancelled"
-          exit 1
+          msg_error "No ${PCT_OSTYPE} templates available"
+          exit 220
         fi
+      fi
+    }
+
+    # Validate that we found a template
+    if [[ -z "$TEMPLATE" ]]; then
+      msg_error "No template found for ${PCT_OSTYPE} ${PCT_OSVERSION}"
+      msg_custom "ℹ️" "${YW}" "Please check:"
+      msg_custom "  •" "${YW}" "Is pveam catalog available? (run: pveam available -section system)"
+      msg_custom "  •" "${YW}" "Does the template exist for your OS version?"
+      exit 225
+    fi
+
+    msg_ok "Template ${BL}$TEMPLATE${CL} [$TEMPLATE_SOURCE]"
+    msg_debug "Resolved TEMPLATE_PATH=$TEMPLATE_PATH"
+
+    NEED_DOWNLOAD=0
+    if [[ ! -f "$TEMPLATE_PATH" ]]; then
+      msg_info "Template not present locally – will download."
+      NEED_DOWNLOAD=1
+    elif [[ ! -r "$TEMPLATE_PATH" ]]; then
+      msg_error "Template file exists but is not readable – check permissions."
+      exit 221
+    elif [[ "$(stat -c%s "$TEMPLATE_PATH")" -lt 1000000 ]]; then
+      if [[ -n "$ONLINE_TEMPLATE" ]]; then
+        msg_warn "Template file too small (<1MB) – re-downloading."
+        NEED_DOWNLOAD=1
       else
-        msg_error "No ${PCT_OSTYPE} templates available"
-        exit 220
+        msg_warn "Template looks too small, but no online version exists. Keeping local file."
+      fi
+    elif ! tar -tf "$TEMPLATE_PATH" &>/dev/null; then
+      if [[ -n "$ONLINE_TEMPLATE" ]]; then
+        msg_warn "Template appears corrupted – re-downloading."
+        NEED_DOWNLOAD=1
+      else
+        msg_warn "Template appears corrupted, but no online version exists. Keeping local file."
+      fi
+    else
+      $STD msg_ok "Template $TEMPLATE is present and valid."
+    fi
+
+    if [[ "$TEMPLATE_SOURCE" == "local" && -n "$ONLINE_TEMPLATE" && "$TEMPLATE" != "$ONLINE_TEMPLATE" ]]; then
+      msg_warn "Local template is outdated: $TEMPLATE (latest available: $ONLINE_TEMPLATE)"
+      if whiptail --yesno "A newer template is available:\n$ONLINE_TEMPLATE\n\nDo you want to download and use it instead?" 12 70; then
+        TEMPLATE="$ONLINE_TEMPLATE"
+        NEED_DOWNLOAD=1
+      else
+        msg_custom "ℹ️" "${BL}" "Continuing with local template $TEMPLATE"
       fi
     fi
-  }
 
-  # Validate that we found a template
-  if [[ -z "$TEMPLATE" ]]; then
-    msg_error "No template found for ${PCT_OSTYPE} ${PCT_OSVERSION}"
-    msg_custom "ℹ️" "${YW}" "Please check:"
-    msg_custom "  •" "${YW}" "Is pveam catalog available? (run: pveam available -section system)"
-    msg_custom "  •" "${YW}" "Does the template exist for your OS version?"
-    exit 225
-  fi
-
-  msg_ok "Template ${BL}$TEMPLATE${CL} [$TEMPLATE_SOURCE]"
-  msg_debug "Resolved TEMPLATE_PATH=$TEMPLATE_PATH"
-
-  NEED_DOWNLOAD=0
-  if [[ ! -f "$TEMPLATE_PATH" ]]; then
-    msg_info "Template not present locally – will download."
-    NEED_DOWNLOAD=1
-  elif [[ ! -r "$TEMPLATE_PATH" ]]; then
-    msg_error "Template file exists but is not readable – check permissions."
-    exit 221
-  elif [[ "$(stat -c%s "$TEMPLATE_PATH")" -lt 1000000 ]]; then
-    if [[ -n "$ONLINE_TEMPLATE" ]]; then
-      msg_warn "Template file too small (<1MB) – re-downloading."
-      NEED_DOWNLOAD=1
-    else
-      msg_warn "Template looks too small, but no online version exists. Keeping local file."
+    if [[ "$NEED_DOWNLOAD" -eq 1 ]]; then
+      [[ -f "$TEMPLATE_PATH" ]] && rm -f "$TEMPLATE_PATH"
+      for attempt in {1..3}; do
+        msg_info "Attempt $attempt: Downloading template $TEMPLATE to $TEMPLATE_STORAGE"
+        if pveam download "$TEMPLATE_STORAGE" "$TEMPLATE" >/dev/null 2>&1; then
+          msg_ok "Template download successful."
+          break
+        fi
+        if [[ $attempt -eq 3 ]]; then
+          msg_error "Failed after 3 attempts. Please check network access, permissions, or manually run:\n  pveam download $TEMPLATE_STORAGE $TEMPLATE"
+          exit 222
+        fi
+        sleep $((attempt * 5))
+      done
     fi
-  elif ! tar -tf "$TEMPLATE_PATH" &>/dev/null; then
-    if [[ -n "$ONLINE_TEMPLATE" ]]; then
-      msg_warn "Template appears corrupted – re-downloading."
-      NEED_DOWNLOAD=1
-    else
-      msg_warn "Template appears corrupted, but no online version exists. Keeping local file."
+
+    if ! pveam list "$TEMPLATE_STORAGE" 2>/dev/null | grep -q "$TEMPLATE"; then
+      msg_error "Template $TEMPLATE not available in storage $TEMPLATE_STORAGE after download."
+      exit 223
     fi
-  else
-    $STD msg_ok "Template $TEMPLATE is present and valid."
-  fi
-
-  if [[ "$TEMPLATE_SOURCE" == "local" && -n "$ONLINE_TEMPLATE" && "$TEMPLATE" != "$ONLINE_TEMPLATE" ]]; then
-    msg_warn "Local template is outdated: $TEMPLATE (latest available: $ONLINE_TEMPLATE)"
-    if whiptail --yesno "A newer template is available:\n$ONLINE_TEMPLATE\n\nDo you want to download and use it instead?" 12 70; then
-      TEMPLATE="$ONLINE_TEMPLATE"
-      NEED_DOWNLOAD=1
-    else
-      msg_custom "ℹ️" "${BL}" "Continuing with local template $TEMPLATE"
-    fi
-  fi
-
-  if [[ "$NEED_DOWNLOAD" -eq 1 ]]; then
-    [[ -f "$TEMPLATE_PATH" ]] && rm -f "$TEMPLATE_PATH"
-    for attempt in {1..3}; do
-      msg_info "Attempt $attempt: Downloading template $TEMPLATE to $TEMPLATE_STORAGE"
-      if pveam download "$TEMPLATE_STORAGE" "$TEMPLATE" >/dev/null 2>&1; then
-        msg_ok "Template download successful."
-        break
-      fi
-      if [[ $attempt -eq 3 ]]; then
-        msg_error "Failed after 3 attempts. Please check network access, permissions, or manually run:\n  pveam download $TEMPLATE_STORAGE $TEMPLATE"
-        exit 222
-      fi
-      sleep $((attempt * 5))
-    done
-  fi
-
-  if ! pveam list "$TEMPLATE_STORAGE" 2>/dev/null | grep -q "$TEMPLATE"; then
-    msg_error "Template $TEMPLATE not available in storage $TEMPLATE_STORAGE after download."
-    exit 223
   fi
 
   # ------------------------------------------------------------------------------
@@ -4891,7 +6168,6 @@ create_lxc_container() {
   if [[ "$PCT_OSTYPE" == "debian" ]]; then
     OSVER="$(parse_template_osver "$TEMPLATE")"
     if [[ -n "$OSVER" ]]; then
-      # Proactive, aber ohne Abbruch – nur Angebot
       offer_lxc_stack_upgrade_and_maybe_retry "no" || true
     fi
   fi
@@ -4912,7 +6188,7 @@ create_lxc_container() {
   -rootfs $CONTAINER_STORAGE:${PCT_DISK_SIZE:-8}"
   fi
 
-  # Lock by template file (avoid concurrent downloads/creates)
+  # Lock by template file (avoid concurrent template downloads/validation)
   lockfile="/tmp/template.${TEMPLATE}.lock"
 
   # Cleanup stale lock files (older than 1 hour - likely from crashed processes)
@@ -4946,84 +6222,84 @@ create_lxc_container() {
 
   LOGFILE="/tmp/pct_create_${CTID}_$(date +%Y%m%d_%H%M%S)_${SESSION_ID}.log"
 
-  # ------------------------------------------------------------------------------
-  # openEuler Template Patch: Create /etc/redhat-release inside template
-  # PVE's post_create_hook expects this file for RHEL-family OS detection
-  # Without it, container creation fails with "error in setup task"
-  # ------------------------------------------------------------------------------
-  if [[ "${var_os:-}" == "openeuler" ]]; then
-    msg_info "Patching openEuler template for PVE compatibility..."
-    local TEMP_EXTRACT_DIR="/tmp/openeuler_template_patch_$$"
-    local PATCHED_TEMPLATE="${TEMPLATE_PATH%.tar.xz}_patched.tar.xz"
-
-    # Only patch if not already patched
-    if [[ ! -f "$PATCHED_TEMPLATE" ]]; then
-      mkdir -p "$TEMP_EXTRACT_DIR"
-
-      # Extract template
-      if tar -xf "$TEMPLATE_PATH" -C "$TEMP_EXTRACT_DIR" 2>/dev/null; then
-        # Create /etc/redhat-release if it doesn't exist
-        if [[ ! -f "$TEMP_EXTRACT_DIR/etc/redhat-release" ]]; then
-          echo "openEuler release ${var_version:-25.03}" >"$TEMP_EXTRACT_DIR/etc/redhat-release"
-        fi
-
-        # Repack template
-        if tar -cJf "$PATCHED_TEMPLATE" -C "$TEMP_EXTRACT_DIR" . 2>/dev/null; then
-          # Replace original with patched version
-          mv "$PATCHED_TEMPLATE" "$TEMPLATE_PATH"
-          msg_ok "openEuler template patched successfully"
-        else
-          msg_warn "Failed to repack template, trying without patch..."
-        fi
-      else
-        msg_warn "Failed to extract template for patching, trying without patch..."
-      fi
-
-      rm -rf "$TEMP_EXTRACT_DIR"
+  # Validate template before pct create (while holding lock)
+  if [[ ! -s "$TEMPLATE_PATH" || "$(stat -c%s "$TEMPLATE_PATH" 2>/dev/null || echo 0)" -lt 1000000 ]]; then
+    msg_info "Template file missing or too small – downloading"
+    rm -f "$TEMPLATE_PATH"
+    download_template
+    msg_ok "Template downloaded"
+  elif ! tar -tf "$TEMPLATE_PATH" &>/dev/null; then
+    if [[ "$ARCH" == "arm64" || -n "$ONLINE_TEMPLATE" ]]; then
+      msg_info "Template appears corrupted – re-downloading"
+      rm -f "$TEMPLATE_PATH"
+      download_template
+      msg_ok "Template re-downloaded"
+    else
+      msg_warn "Template appears corrupted, but no online version exists. Skipping re-download."
     fi
   fi
 
-  # # DEBUG: Show the actual command that will be executed
-  # echo "[DEBUG] ===== PCT CREATE COMMAND DETAILS ====="
-  # echo "[DEBUG] CTID: $CTID"
-  # echo "[DEBUG] Template: ${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}"
-  # echo "[DEBUG] PCT_OPTIONS (will be word-split):"
-  # echo "$PCT_OPTIONS" | sed 's/^/  /'
-  # echo "[DEBUG] Full command line:"
-  # echo "  pct create $CTID ${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE} $PCT_OPTIONS"
-  # echo "[DEBUG] ========================================"
+  # openEuler templates are detected by PVE as ostype 'centos' but ship without
+  # /etc/redhat-release, which makes PVE::LXC::Setup::post_create_hook abort with
+  # "can't open '/etc/redhat-release' - No such file or directory".
+  # Patch the cached template once to inject a CentOS-compatible release file.
+  if [[ "${var_os:-}" == "openeuler" ]]; then
+    if ! tar -tf "$TEMPLATE_PATH" 2>/dev/null | grep -qE '^\.?/?etc/redhat-release$'; then
+      msg_info "Patching openEuler template (adding /etc/redhat-release)"
+      local _oe_tmp
+      _oe_tmp=$(mktemp -d) || _oe_tmp=""
+      if [[ -n "$_oe_tmp" ]] && mkdir -p "$_oe_tmp/etc"; then
+        # Content is parsed by PVE's CentOS setup plugin (expects "<name> release <ver>")
+        local _oe_ver="${var_version:-25.03}"
+        echo "CentOS Linux release ${_oe_ver} (openEuler)" >"$_oe_tmp/etc/redhat-release"
+        if xz -dc "$TEMPLATE_PATH" >"$_oe_tmp/template.tar" 2>/dev/null &&
+          tar -C "$_oe_tmp" --append -f "$_oe_tmp/template.tar" etc/redhat-release 2>/dev/null &&
+          xz -f "$_oe_tmp/template.tar" 2>/dev/null &&
+          mv -f "$_oe_tmp/template.tar.xz" "$TEMPLATE_PATH"; then
+          msg_ok "Patched openEuler template"
+        else
+          msg_warn "Failed to patch openEuler template – pct create may fail in post_create_hook"
+        fi
+        rm -rf "$_oe_tmp"
+      fi
+    fi
+  fi
+
+  # Release lock after template validation - pct create has its own internal locking
+  exec 9>&-
 
   msg_debug "pct create command: pct create $CTID ${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE} $PCT_OPTIONS"
   msg_debug "Logfile: $LOGFILE"
 
   # First attempt (PCT_OPTIONS is a multi-line string, use it directly)
   if ! pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" $PCT_OPTIONS >"$LOGFILE" 2>&1; then
-    msg_debug "Container creation failed on ${TEMPLATE_STORAGE}. Validating template..."
+    msg_debug "Container creation failed on ${TEMPLATE_STORAGE}. Checking error..."
 
-    # Validate template file
-    if [[ ! -s "$TEMPLATE_PATH" || "$(stat -c%s "$TEMPLATE_PATH")" -lt 1000000 ]]; then
-      msg_warn "Template file too small or missing – re-downloading."
+    # Check if template issue - retry with fresh download
+    if grep -qiE 'unable to open|corrupt|invalid' "$LOGFILE"; then
+      msg_info "Template may be corrupted – re-downloading"
       rm -f "$TEMPLATE_PATH"
-      pveam download "$TEMPLATE_STORAGE" "$TEMPLATE"
-    elif ! tar -tf "$TEMPLATE_PATH" &>/dev/null; then
-      if [[ -n "$ONLINE_TEMPLATE" ]]; then
-        msg_warn "Template appears corrupted – re-downloading."
-        rm -f "$TEMPLATE_PATH"
-        pveam download "$TEMPLATE_STORAGE" "$TEMPLATE"
-      else
-        msg_warn "Template appears corrupted, but no online version exists. Skipping re-download."
-      fi
+      download_template
+      msg_ok "Template re-downloaded"
     fi
 
     # Retry after repair
     if ! pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" $PCT_OPTIONS >>"$LOGFILE" 2>&1; then
       # Fallback to local storage if not already on local
       if [[ "$TEMPLATE_STORAGE" != "local" ]]; then
-        msg_info "Retrying container creation with fallback to local storage..."
+        msg_info "Retrying container creation with fallback to local storage"
         LOCAL_TEMPLATE_PATH="/var/lib/vz/template/cache/$TEMPLATE"
         if [[ ! -f "$LOCAL_TEMPLATE_PATH" ]]; then
-          msg_info "Downloading template to local..."
-          pveam download local "$TEMPLATE" >/dev/null 2>&1
+          msg_ok "Trying local storage fallback"
+          msg_info "Downloading template to local"
+          if [[ "$ARCH" == "arm64" ]]; then
+            download_arm64_template "$LOCAL_TEMPLATE_PATH"
+          else
+            pveam download local "$TEMPLATE" >/dev/null 2>&1
+          fi
+          msg_ok "Template downloaded to local"
+        else
+          msg_ok "Trying local storage fallback"
         fi
         if ! pct create "$CTID" "local:vztmpl/${TEMPLATE}" $PCT_OPTIONS >>"$LOGFILE" 2>&1; then
           # Local fallback also failed - check for LXC stack version issue
@@ -5105,9 +6381,6 @@ create_lxc_container() {
   }
 
   msg_ok "LXC Container ${BL}$CTID${CL} ${GN}was successfully created."
-
-  # Report container creation to API
-  post_to_api
 }
 
 # ==============================================================================
@@ -5134,7 +6407,7 @@ description() {
     cat <<EOF
 <div align='center'>
   <a href='https://Helper-Scripts.com' target='_blank' rel='noopener noreferrer'>
-    <img src='https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/images/logo-81x112.png' alt='Logo' style='width:81px;height:112px;'/>
+    <img src='https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main/misc/images/logo-81x112.png' alt='Logo' style='width:81px;height:112px;'/>
   </a>
 
   <h2 style='font-size: 24px; margin: 20px 0;'>${APP} LXC</h2>
@@ -5147,15 +6420,15 @@ description() {
 
   <span style='margin: 0 10px;'>
     <i class="fa fa-github fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVED' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>GitHub</a>
+    <a href='https://git.community-scripts.org/community-scripts/ProxmoxVED' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Git</a>
   </span>
   <span style='margin: 0 10px;'>
     <i class="fa fa-comments fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVED/discussions' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Discussions</a>
+    <a href='https://git.community-scripts.org/community-scripts/ProxmoxVED/discussions' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Discussions</a>
   </span>
   <span style='margin: 0 10px;'>
     <i class="fa fa-exclamation-circle fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVED/issues' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Issues</a>
+    <a href='https://git.community-scripts.org/community-scripts/ProxmoxVED/issues' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Issues</a>
   </span>
 </div>
 EOF
@@ -5174,24 +6447,99 @@ EOF
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
+# ensure_log_on_host()
+#
+# - Ensures INSTALL_LOG points to a readable file on the host
+# - If INSTALL_LOG points to a container path (e.g. /root/.install-*),
+#   tries to pull it from the container and create a combined log
+# - This allows get_error_text() to find actual error output for telemetry
+# - Uses timeout on pct pull to prevent hangs on dead/unresponsive containers
+# ------------------------------------------------------------------------------
+ensure_log_on_host() {
+  # Already readable on host? Nothing to do.
+  [[ -n "${INSTALL_LOG:-}" && -s "${INSTALL_LOG}" ]] && return 0
+
+  # Try pulling from container and creating combined log
+  if [[ -n "${CTID:-}" && -n "${SESSION_ID:-}" ]] && command -v pct &>/dev/null; then
+    local combined_log="/tmp/${NSAPP:-lxc}-${CTID}-${SESSION_ID}.log"
+    if [[ ! -s "$combined_log" ]]; then
+      # Create combined log
+      {
+        echo "================================================================================"
+        echo "COMBINED INSTALLATION LOG - ${APP:-LXC}"
+        echo "Container ID: ${CTID}"
+        echo "Session ID: ${SESSION_ID}"
+        echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "================================================================================"
+        echo ""
+      } >"$combined_log" 2>/dev/null || return 0
+      # Append BUILD_LOG if it exists
+      if [[ -f "${BUILD_LOG:-}" ]]; then
+        {
+          echo "================================================================================"
+          echo "PHASE 1: CONTAINER CREATION (Host)"
+          echo "================================================================================"
+          cat "${BUILD_LOG}"
+          echo ""
+        } >>"$combined_log"
+      fi
+      # Pull INSTALL_LOG from container (with timeout to prevent hangs on dead containers)
+      local temp_log="/tmp/.install-temp-${SESSION_ID}.log"
+      if timeout 8 pct pull "$CTID" "/root/.install-${SESSION_ID}.log" "$temp_log" 2>/dev/null; then
+        {
+          echo "================================================================================"
+          echo "PHASE 2: APPLICATION INSTALLATION (Container)"
+          echo "================================================================================"
+          cat "$temp_log"
+          echo ""
+        } >>"$combined_log"
+        rm -f "$temp_log"
+      fi
+    fi
+    if [[ -s "$combined_log" ]]; then
+      INSTALL_LOG="$combined_log"
+    fi
+  fi
+}
+
+# ------------------------------------------------------------------------------
 # api_exit_script()
 #
 # - Exit trap handler for reporting to API telemetry
-# - Captures exit code and reports to API using centralized error descriptions
-# - Uses explain_exit_code() from error_handler.func for consistent error messages
-# - Posts failure status with exit code to API (error description added automatically)
-# - Only executes on non-zero exit codes
+# - Captures exit code and reports to PocketBase using centralized error descriptions
+# - Uses explain_exit_code() from api.func for consistent error messages
+# - ALWAYS sends telemetry FIRST before log collection to prevent pct pull
+#   hangs from blocking status updates (container may be dead/unresponsive)
+# - For non-zero exit codes: posts "failed" status
+# - For zero exit codes where post_update_to_api was never called:
+#   catches orphaned "installing" records (e.g., script exited cleanly
+#   but description() was never reached)
 # ------------------------------------------------------------------------------
 api_exit_script() {
-  exit_code=$?
+  local exit_code=$?
   if [ $exit_code -ne 0 ]; then
-    post_update_to_api "failed" "$exit_code"
+    # ALWAYS send telemetry FIRST - ensure status is reported even if
+    # ensure_log_on_host hangs (e.g. pct pull on dead container)
+    post_update_to_api "failed" "$exit_code" 2>/dev/null || true
+    # Best-effort log collection (non-critical after telemetry is sent)
+    if declare -f ensure_log_on_host >/dev/null 2>&1; then
+      ensure_log_on_host 2>/dev/null || true
+    fi
+    # Stop orphaned container if we're in the install phase
+    if [[ "${CONTAINER_INSTALLING:-}" == "true" && -n "${CTID:-}" ]] && command -v pct &>/dev/null; then
+      pct stop "$CTID" 2>/dev/null || true
+    fi
+  elif [[ "${POST_TO_API_DONE:-}" == "true" && "${POST_UPDATE_DONE:-}" != "true" ]]; then
+    # Script exited with 0 but never sent a completion status
+    # exit_code=0 is never an error — report as success
+    post_update_to_api "done" "0"
   fi
 }
 
 if command -v pveversion >/dev/null 2>&1; then
   trap 'api_exit_script' EXIT
 fi
-trap 'post_update_to_api "failed" "$BASH_COMMAND"' ERR
-trap 'post_update_to_api "failed" "INTERRUPTED"' SIGINT
-trap 'post_update_to_api "failed" "TERMINATED"' SIGTERM
+trap 'local _ec=$?; if [[ $_ec -ne 0 ]]; then post_update_to_api "failed" "$_ec" 2>/dev/null || true; if declare -f ensure_log_on_host &>/dev/null; then ensure_log_on_host 2>/dev/null || true; fi; fi' ERR
+trap 'post_update_to_api "failed" "129" 2>/dev/null || true; if [[ -n "${CTID:-}" ]] && command -v pct &>/dev/null; then pct stop "$CTID" 2>/dev/null || true; fi; exit 129' SIGHUP
+trap 'post_update_to_api "failed" "130" 2>/dev/null || true; if [[ -n "${CTID:-}" ]] && command -v pct &>/dev/null; then pct stop "$CTID" 2>/dev/null || true; fi; exit 130' SIGINT
+trap 'post_update_to_api "failed" "143" 2>/dev/null || true; if [[ -n "${CTID:-}" ]] && command -v pct &>/dev/null; then pct stop "$CTID" 2>/dev/null || true; fi; exit 143' SIGTERM

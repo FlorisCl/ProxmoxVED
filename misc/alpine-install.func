@@ -1,13 +1,14 @@
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: tteck (tteckster)
 # Co-Author: MickLesk
-# License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
+# License: MIT | https://github.com/community-scripts/ProxmoxVED/raw/main/LICENSE
 
 if ! command -v curl >/dev/null 2>&1; then
   apk update && apk add curl >/dev/null 2>&1
 fi
-source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/core.func)
-source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/error_handler.func)
+COMMUNITY_SCRIPTS_URL="${COMMUNITY_SCRIPTS_URL:-https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main}"
+source <(curl -fsSL "$COMMUNITY_SCRIPTS_URL/misc/core.func")
+source <(curl -fsSL "$COMMUNITY_SCRIPTS_URL/misc/error_handler.func")
 load_functions
 catch_errors
 
@@ -38,9 +39,9 @@ trap on_interrupt INT
 trap on_terminate TERM
 
 error_handler() {
-  local exit_code="$1"
-  local line_number="$2"
-  local command="$3"
+  local exit_code="${1:-$?}"
+  local line_number="${2:-unknown}"
+  local command="${3:-unknown}"
 
   # Exitcode 0 = kein Fehler → ignorieren
   if [[ "$exit_code" -eq 0 ]]; then
@@ -112,14 +113,14 @@ network_check() {
     msg_ok "Internet: ${ipv4_status}  DNS: ${BL}${RESOLVEDIP}${CL}"
   fi
   set -e
-  trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
+  trap 'error_handler $? $LINENO "$BASH_COMMAND"' ERR
 }
 
 # This function updates the Container OS by running apt-get update and upgrade
 update_os() {
   msg_info "Updating Container OS"
   $STD apk -U upgrade
-  source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/alpine-tools.func)
+  source <(curl -fsSL "$COMMUNITY_SCRIPTS_URL/misc/alpine-tools.func")
   msg_ok "Updated Container OS"
 }
 

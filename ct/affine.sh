@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main/misc/build.func)
+
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVED/raw/main/LICENSE
@@ -12,6 +13,7 @@ var_ram="${var_ram:-8192}"
 var_disk="${var_disk:-20}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
+var_arm64="${var_arm64:-no}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -29,19 +31,16 @@ function update_script() {
     exit
   fi
 
-  if check_for_gh_release "affine" "toeverything/AFFiNE"; then
+  if check_for_gh_release "affine_app" "toeverything/AFFiNE"; then
     msg_info "Stopping Services"
     systemctl stop affine-web affine-worker
     msg_ok "Stopped Services"
 
-    msg_info "Backing up Data"
-    cp -r /root/.affine/storage /root/.affine_storage_backup 2>/dev/null || true
-    cp -r /root/.affine/config /root/.affine_config_backup 2>/dev/null || true
-    msg_ok "Backed up Data"
+    create_backup /root/.affine/config /root/.affine/storage
 
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "affine_app" "toeverything/AFFiNE" "tarball" "latest" "/opt/affine"
 
-    msg_info "Rebuilding Application"
+    msg_info "Rebuilding Application (Patience)"
     cd /opt/affine
     source /root/.profile
     export PATH="/root/.cargo/bin:/root/.rbenv/shims:$PATH"
@@ -49,7 +48,7 @@ function update_script() {
     set -a && source /opt/affine/.env && set +a
 
     export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-    export VITE_CORE_COMMIT_SHA=$(get_latest_github_release "toeverything/AFFiNE")
+    export VITE_CORE_COMMIT_SHA=$(cat ~/.affine_app)
 
     # Initialize git repo (required for build process)
     git init -q
@@ -91,31 +90,25 @@ TURBO
 
     export NODE_OPTIONS="--max-old-space-size=4096"
     $STD yarn affine build -p @affine/web
+    $STD yarn affine build -p @affine/admin
 
     # Copy web assets
     mkdir -p /opt/affine/packages/backend/server/static
     cp -r /opt/affine/packages/frontend/apps/web/dist/* /opt/affine/packages/backend/server/static/
+    mkdir -p /opt/affine/packages/backend/server/static/admin
+    cp -r /opt/affine/packages/frontend/admin/dist/* /opt/affine/packages/backend/server/static/admin/
 
     # Mobile manifest placeholder
     mkdir -p /opt/affine/packages/backend/server/static/mobile
     echo '{"publicPath":"/","js":[],"css":[],"gitHash":"","description":""}' \
       >/opt/affine/packages/backend/server/static/mobile/assets-manifest.json
 
-    # Admin selfhost.html
-    mkdir -p /opt/affine/packages/backend/server/static/admin
-    cp /opt/affine/packages/backend/server/static/selfhost.html \
-      /opt/affine/packages/backend/server/static/admin/selfhost.html
-
     # Run migrations
     cd /opt/affine/packages/backend/server
     set -a && source /opt/affine/.env && set +a
     $STD node ./scripts/self-host-predeploy.js
 
-    msg_info "Restoring Data"
-    cp -r /root/.affine_storage_backup/. /root/.affine/storage/ 2>/dev/null || true
-    cp -r /root/.affine_config_backup/. /root/.affine/config/ 2>/dev/null || true
-    rm -rf /root/.affine_storage_backup /root/.affine_config_backup
-    msg_ok "Restored Data"
+    restore_backup
 
     msg_info "Starting Services"
     systemctl start affine-web affine-worker

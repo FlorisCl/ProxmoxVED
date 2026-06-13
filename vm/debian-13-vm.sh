@@ -4,7 +4,8 @@
 # Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 
-source /dev/stdin <<<$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/api.func)
+COMMUNITY_SCRIPTS_URL="${COMMUNITY_SCRIPTS_URL:-https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main}"
+source /dev/stdin <<<$(curl -fsSL "$COMMUNITY_SCRIPTS_URL/misc/api.func")
 
 function header_info {
   clear
@@ -139,7 +140,7 @@ function check_root() {
 }
 
 # This function checks the version of Proxmox Virtual Environment (PVE) and exits if the version is not supported.
-# Supported: Proxmox VE 8.0.x – 8.9.x and 9.0 – 9.1
+# Supported: Proxmox VE 8.0.x – 8.9.x and 9.0 – 9.2
 pve_check() {
   local PVE_VER
   PVE_VER="$(pveversion | awk -F'/' '{print $2}' | awk -F'-' '{print $1}')"
@@ -155,12 +156,12 @@ pve_check() {
     return 0
   fi
 
-  # Check for Proxmox VE 9.x: allow 9.0–9.1
+  # Check for Proxmox VE 9.x: allow 9.0–9.2
   if [[ "$PVE_VER" =~ ^9\.([0-9]+) ]]; then
     local MINOR="${BASH_REMATCH[1]}"
-    if ((MINOR < 0 || MINOR > 1)); then
+    if ((MINOR < 0 || MINOR > 2)); then
       msg_error "This version of Proxmox VE is not yet supported."
-      msg_error "Supported: Proxmox VE version 9.0 – 9.1"
+      msg_error "Supported: Proxmox VE version 9.0 – 9.2"
       exit 1
     fi
     return 0
@@ -168,7 +169,7 @@ pve_check() {
 
   # All other unsupported versions
   msg_error "This version of Proxmox VE is not supported."
-  msg_error "Supported versions: Proxmox VE 8.0 – 8.x or 9.0 – 9.1"
+  msg_error "Supported versions: Proxmox VE 8.0 – 8.x or 9.0 – 9.2"
   exit 1
 }
 

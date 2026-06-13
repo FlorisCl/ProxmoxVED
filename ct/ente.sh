@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/build.func)
+source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main/misc/build.func)
+
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVED/raw/main/LICENSE
-# Source: https://www.debian.org/
+# Source: https://github.com/ente-io/ente
 
 APP="Ente"
 var_tags="${var_tags:-photos}"
@@ -12,6 +13,7 @@ var_ram="${var_ram:-6144}"
 var_disk="${var_disk:-20}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
+var_arm64="${var_arm64:-no}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -23,13 +25,13 @@ function update_script() {
   header_info
   check_container_storage
   check_container_resources
-  if [[ ! -d /var ]]; then
+  if [[ ! -d /opt/ente ]]; then
     msg_error "No ${APP} Installation Found!"
     exit
   fi
   msg_info "Updating Ente LXC"
-  $STD apt-get update
-  $STD apt-get -y upgrade
+  $STD apt update
+  $STD apt -y upgrade
   msg_ok "Updated Ente LXC"
   exit
 }

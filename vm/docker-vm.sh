@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 
 # Copyright (c) 2021-2026 community-scripts ORG
-# Author: thost96 (thost96) | Co-Author: michelroegl-brunner | Refactored: MickLesk
+# Author: thost96 (thost96) | michelroegl-brunner | MickLesk
 # License: MIT | https://github.com/community-scripts/ProxmoxVED/raw/main/LICENSE
 
 # ==============================================================================
-# Docker VM - Creates a Docker-ready Virtual Machine with optional Portainer
+# Docker VM - Creates a Docker-ready Virtual Machine
 # ==============================================================================
 
-source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/api.func)
-source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/vm-core.func)
-source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/cloud-init.func) 2>/dev/null || true
+source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVE/raw/branch/main/misc/api.func) 2>/dev/null
+source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVE/raw/branch/main/misc/vm-core.func) 2>/dev/null
+source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVE/raw/branch/main/misc/cloud-init.func) 2>/dev/null || true
 load_functions
 
 # ==============================================================================
@@ -27,7 +27,6 @@ RANDOM_UUID="$(cat /proc/sys/kernel/random/uuid)"
 METHOD=""
 DISK_SIZE="10G"
 USE_CLOUD_INIT="no"
-INSTALL_PORTAINER="no"
 OS_TYPE=""
 OS_VERSION=""
 THIN="discard=on,ssd=1,"
@@ -38,15 +37,16 @@ THIN="discard=on,ssd=1,"
 set -e
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
-trap 'post_update_to_api "failed" "INTERRUPTED"' SIGINT
-trap 'post_update_to_api "failed" "TERMINATED"' SIGTERM
+trap 'post_update_to_api "failed" "130"' SIGINT
+trap 'post_update_to_api "failed" "143"' SIGTERM
+trap 'post_update_to_api "failed" "129"; exit 129' SIGHUP
 
 function error_handler() {
   local exit_code="$?"
   local line_number="$1"
   local command="$2"
   local error_message="${RD}[ERROR]${CL} in line ${RD}$line_number${CL}: exit code ${RD}$exit_code${CL}: while executing command ${YW}$command${CL}"
-  post_update_to_api "failed" "${command}"
+  post_update_to_api "failed" "${exit_code}"
   echo -e "\n$error_message\n"
   cleanup_vmid
 }
@@ -95,14 +95,12 @@ function select_os() {
 }
 
 function select_cloud_init() {
-  # Ubuntu only has cloudimg variant (always Cloud-Init), so no choice needed
   if [ "$OS_TYPE" = "ubuntu" ]; then
     USE_CLOUD_INIT="yes"
     echo -e "${CLOUD:-${TAB}☁️${TAB}${CL}}${BOLD}${DGN}Cloud-Init: ${BGN}yes (Ubuntu requires Cloud-Init)${CL}"
     return
   fi
 
-  # Debian has two image variants, so user can choose
   if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "CLOUD-INIT" \
     --yesno "Enable Cloud-Init for VM configuration?\n\nCloud-Init allows automatic configuration of:\n- User accounts and passwords\n- SSH keys\n- Network settings (DHCP/Static)\n- DNS configuration\n\nYou can also configure these settings later in Proxmox UI.\n\nNote: Debian without Cloud-Init will use nocloud image with console auto-login." 18 68); then
     USE_CLOUD_INIT="yes"
@@ -110,17 +108,6 @@ function select_cloud_init() {
   else
     USE_CLOUD_INIT="no"
     echo -e "${CLOUD:-${TAB}☁️${TAB}${CL}}${BOLD}${DGN}Cloud-Init: ${BGN}no${CL}"
-  fi
-}
-
-function select_portainer() {
-  if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "PORTAINER" \
-    --yesno "Install Portainer for Docker management?\n\nPortainer is a lightweight management UI for Docker.\n\nAccess after installation:\n- HTTP:  http://<VM-IP>:9000\n- HTTPS: https://<VM-IP>:9443" 14 68); then
-    INSTALL_PORTAINER="yes"
-    echo -e "${ADVANCED}${BOLD}${DGN}Portainer: ${BGN}yes${CL}"
-  else
-    INSTALL_PORTAINER="no"
-    echo -e "${ADVANCED}${BOLD}${DGN}Portainer: ${BGN}no${CL}"
   fi
 }
 
@@ -144,12 +131,9 @@ function get_image_url() {
 # SETTINGS FUNCTIONS
 # ==============================================================================
 function default_settings() {
-  # OS Selection - ALWAYS ask
   select_os
   select_cloud_init
-  select_portainer
 
-  # Set defaults
   VMID=$(get_valid_nextid)
   FORMAT=""
   MACHINE=" -machine q35"
@@ -166,7 +150,6 @@ function default_settings() {
   START_VM="yes"
   METHOD="default"
 
-  # Display summary
   echo -e "${CONTAINERID}${BOLD}${DGN}Virtual Machine ID: ${BGN}${VMID}${CL}"
   echo -e "${CONTAINERTYPE}${BOLD}${DGN}Machine Type: ${BGN}Q35 (Modern)${CL}"
   echo -e "${DISKSIZE}${BOLD}${DGN}Disk Size: ${BGN}${DISK_SIZE}${CL}"
@@ -184,10 +167,13 @@ function default_settings() {
 }
 
 function advanced_settings() {
-  # OS Selection - ALWAYS ask first
   select_os
   select_cloud_init
-  select_portainer
+
+  # SSH Key selection for Cloud-Init VMs
+  if [ "$USE_CLOUD_INIT" = "yes" ]; then
+    configure_cloudinit_ssh_keys || true
+  fi
 
   METHOD="advanced"
   [ -z "${VMID:-}" ] && VMID=$(get_valid_nextid)
@@ -265,7 +251,10 @@ function advanced_settings() {
     if [ -z $VM_NAME ]; then
       HN="docker"
     else
-      HN=$(echo ${VM_NAME,,} | tr -d ' ')
+      HN=$(echo "${VM_NAME,,}" | tr -cs 'a-z0-9-' '-' | sed 's/^-//;s/-$//')
+      if [ "$HN" != "${VM_NAME,,}" ]; then
+        whiptail --backtitle "Proxmox VE Helper Scripts" --title "HOSTNAME ADJUSTED" --msgbox "Invalid characters detected. Hostname has been adjusted to:\n\n  $HN" 10 58
+      fi
     fi
     echo -e "${HOSTNAME}${BOLD}${DGN}Hostname: ${BGN}$HN${CL}"
   else
@@ -289,24 +278,32 @@ function advanced_settings() {
   fi
 
   # CPU Cores
-  if CORE_COUNT=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate CPU Cores" 8 58 2 --title "CORE COUNT" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-    if [ -z $CORE_COUNT ]; then
-      CORE_COUNT="2"
+  while true; do
+    if CORE_COUNT=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate CPU Cores" 8 58 2 --title "CORE COUNT" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+      if [ -z "$CORE_COUNT" ]; then CORE_COUNT="2"; fi
+      if [[ "$CORE_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+        echo -e "${CPUCORE}${BOLD}${DGN}CPU Cores: ${BGN}$CORE_COUNT${CL}"
+        break
+      fi
+      whiptail --backtitle "Proxmox VE Helper Scripts" --title "INVALID INPUT" --msgbox "CPU Cores must be a positive integer (e.g., 2)." 8 58
+    else
+      exit_script
     fi
-    echo -e "${CPUCORE}${BOLD}${DGN}CPU Cores: ${BGN}$CORE_COUNT${CL}"
-  else
-    exit_script
-  fi
+  done
 
   # RAM Size
-  if RAM_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate RAM in MiB" 8 58 4096 --title "RAM" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-    if [ -z $RAM_SIZE ]; then
-      RAM_SIZE="4096"
+  while true; do
+    if RAM_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate RAM in MiB" 8 58 4096 --title "RAM" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+      if [ -z "$RAM_SIZE" ]; then RAM_SIZE="4096"; fi
+      if [[ "$RAM_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+        echo -e "${RAMSIZE}${BOLD}${DGN}RAM Size: ${BGN}$RAM_SIZE${CL}"
+        break
+      fi
+      whiptail --backtitle "Proxmox VE Helper Scripts" --title "INVALID INPUT" --msgbox "RAM Size must be a positive integer in MiB (e.g., 4096)." 8 58
+    else
+      exit_script
     fi
-    echo -e "${RAMSIZE}${BOLD}${DGN}RAM Size: ${BGN}$RAM_SIZE${CL}"
-  else
-    exit_script
-  fi
+  done
 
   # Bridge
   if BRG=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a Bridge" 8 58 vmbr0 --title "BRIDGE" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
@@ -319,42 +316,63 @@ function advanced_settings() {
   fi
 
   # MAC Address
-  if MAC1=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a MAC Address" 8 58 $GEN_MAC --title "MAC ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-    if [ -z $MAC1 ]; then
-      MAC="$GEN_MAC"
+  while true; do
+    if MAC1=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a MAC Address" 8 58 $GEN_MAC --title "MAC ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+      if [ -z "$MAC1" ]; then
+        MAC="$GEN_MAC"
+        echo -e "${MACADDRESS}${BOLD}${DGN}MAC Address: ${BGN}$MAC${CL}"
+        break
+      fi
+      if [[ "$MAC1" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
+        MAC="$MAC1"
+        echo -e "${MACADDRESS}${BOLD}${DGN}MAC Address: ${BGN}$MAC${CL}"
+        break
+      fi
+      whiptail --backtitle "Proxmox VE Helper Scripts" --title "INVALID INPUT" --msgbox "Invalid MAC address format. Use XX:XX:XX:XX:XX:XX (e.g., AA:BB:CC:DD:EE:FF)." 8 58
     else
-      MAC="$MAC1"
+      exit_script
     fi
-    echo -e "${MACADDRESS}${BOLD}${DGN}MAC Address: ${BGN}$MAC${CL}"
-  else
-    exit_script
-  fi
+  done
 
   # VLAN
-  if VLAN1=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a Vlan (leave blank for default)" 8 58 --title "VLAN" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-    if [ -z $VLAN1 ]; then
-      VLAN1="Default"
-      VLAN=""
+  while true; do
+    if VLAN1=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a Vlan (leave blank for default)" 8 58 --title "VLAN" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+      if [ -z "$VLAN1" ]; then
+        VLAN1="Default"
+        VLAN=""
+        echo -e "${VLANTAG}${BOLD}${DGN}VLAN: ${BGN}$VLAN1${CL}"
+        break
+      fi
+      if [[ "$VLAN1" =~ ^[0-9]+$ ]] && [ "$VLAN1" -ge 1 ] && [ "$VLAN1" -le 4094 ]; then
+        VLAN=",tag=$VLAN1"
+        echo -e "${VLANTAG}${BOLD}${DGN}VLAN: ${BGN}$VLAN1${CL}"
+        break
+      fi
+      whiptail --backtitle "Proxmox VE Helper Scripts" --title "INVALID INPUT" --msgbox "VLAN must be a number between 1 and 4094, or leave blank for default." 8 58
     else
-      VLAN=",tag=$VLAN1"
+      exit_script
     fi
-    echo -e "${VLANTAG}${BOLD}${DGN}VLAN: ${BGN}$VLAN1${CL}"
-  else
-    exit_script
-  fi
+  done
 
   # MTU
-  if MTU1=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Interface MTU Size (leave blank for default)" 8 58 --title "MTU SIZE" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-    if [ -z $MTU1 ]; then
-      MTU1="Default"
-      MTU=""
+  while true; do
+    if MTU1=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Interface MTU Size (leave blank for default)" 8 58 --title "MTU SIZE" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+      if [ -z "$MTU1" ]; then
+        MTU1="Default"
+        MTU=""
+        echo -e "${DEFAULT}${BOLD}${DGN}Interface MTU Size: ${BGN}$MTU1${CL}"
+        break
+      fi
+      if [[ "$MTU1" =~ ^[0-9]+$ ]] && [ "$MTU1" -ge 576 ] && [ "$MTU1" -le 65520 ]; then
+        MTU=",mtu=$MTU1"
+        echo -e "${DEFAULT}${BOLD}${DGN}Interface MTU Size: ${BGN}$MTU1${CL}"
+        break
+      fi
+      whiptail --backtitle "Proxmox VE Helper Scripts" --title "INVALID INPUT" --msgbox "MTU Size must be a number between 576 and 65520, or leave blank for default." 8 58
     else
-      MTU=",mtu=$MTU1"
+      exit_script
     fi
-    echo -e "${DEFAULT}${BOLD}${DGN}Interface MTU Size: ${BGN}$MTU1${CL}"
-  else
-    exit_script
-  fi
+  done
 
   # Start VM
   if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "START VIRTUAL MACHINE" --yesno "Start VM when completed?" 10 58); then
@@ -388,147 +406,13 @@ function start_script() {
 }
 
 # ==============================================================================
-# DOCKER INSTALLATION SCRIPTS
-# ==============================================================================
-function create_docker_install_script() {
-  local file="$1"
-  local with_portainer="$2"
-
-  local portainer_section=""
-  if [ "$with_portainer" = "yes" ]; then
-    portainer_section='
-# Install Portainer
-/root/portainer-install.sh'
-  else
-    portainer_section='
-# Portainer not requested - skip installation'
-  fi
-
-  virt-customize -q -a "${file}" --run-command "cat > /root/install-docker.sh << 'INSTALLEOF'
-#!/bin/bash
-# Log output to file
-exec > /var/log/install-docker.log 2>&1
-echo \"[\$(date)] Starting Docker installation on first boot\"
-
-# Check if Docker is already installed
-if command -v docker >/dev/null 2>&1; then
-  echo \"[\$(date)] Docker already installed, checking if running\"
-  systemctl start docker 2>/dev/null || true
-  if docker info >/dev/null 2>&1; then
-    echo \"[\$(date)] Docker is already working, exiting\"
-    exit 0
-  fi
-fi
-
-# Wait for network to be fully available
-for i in {1..30}; do
-  if ping -c 1 8.8.8.8 >/dev/null 2>&1; then
-    echo \"[\$(date)] Network is available\"
-    break
-  fi
-  echo \"[\$(date)] Waiting for network... attempt \$i/30\"
-  sleep 2
-done
-
-# Configure DNS
-echo \"[\$(date)] Configuring DNS\"
-mkdir -p /etc/systemd/resolved.conf.d
-cat > /etc/systemd/resolved.conf.d/dns.conf << DNSEOF
-[Resolve]
-DNS=8.8.8.8 1.1.1.1
-FallbackDNS=8.8.4.4 1.0.0.1
-DNSEOF
-systemctl restart systemd-resolved 2>/dev/null || true
-
-# Update package lists
-echo \"[\$(date)] Updating package lists\"
-apt-get update
-
-# Install base packages if not already installed
-echo \"[\$(date)] Installing base packages\"
-apt-get install -y qemu-guest-agent curl ca-certificates 2>/dev/null || true
-
-# Install Docker
-echo \"[\$(date)] Installing Docker\"
-curl -fsSL https://get.docker.com | sh
-systemctl enable docker
-systemctl start docker
-
-# Wait for Docker to be ready
-for i in {1..10}; do
-  if docker info >/dev/null 2>&1; then
-    echo \"[\$(date)] Docker is ready\"
-    break
-  fi
-  sleep 1
-done
-${portainer_section}
-
-# Create completion flag
-echo \"[\$(date)] Docker installation completed successfully\"
-touch /root/.docker-installed
-INSTALLEOF" >/dev/null
-
-  virt-customize -q -a "${file}" --run-command "chmod +x /root/install-docker.sh" >/dev/null
-}
-
-function create_portainer_script() {
-  local file="$1"
-
-  virt-customize -q -a "${file}" --run-command 'cat > /root/portainer-install.sh << '"'"'PORTAINEREOF'"'"'
-#!/bin/bash
-exec >> /var/log/install-docker.log 2>&1
-echo "[$(date)] Installing Portainer"
-docker volume create portainer_data 2>/dev/null || true
-docker run -d \
-  -p 9000:9000 \
-  -p 9443:9443 \
-  --name=portainer \
-  --restart=always \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v portainer_data:/data \
-  portainer/portainer-ce:latest
-echo "[$(date)] Portainer installed"
-PORTAINEREOF' >/dev/null
-
-  virt-customize -q -a "${file}" --run-command 'chmod +x /root/portainer-install.sh' >/dev/null
-}
-
-function create_docker_service() {
-  local file="$1"
-
-  virt-customize -q -a "${file}" --run-command 'cat > /etc/systemd/system/install-docker.service << "SERVICEEOF"
-[Unit]
-Description=Install Docker on First Boot
-After=network-online.target
-Wants=network-online.target
-ConditionPathExists=!/root/.docker-installed
-
-[Service]
-Type=oneshot
-ExecStart=/root/install-docker.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-SERVICEEOF
-' >/dev/null
-
-  virt-customize -q -a "${file}" --run-command "systemctl enable install-docker.service" >/dev/null
-}
-
-# ==============================================================================
 # MAIN EXECUTION
 # ==============================================================================
 header_info
-echo -e "\n Loading..."
 
 check_root
 arch_check
 pve_check
-
-TEMP_DIR=$(mktemp -d)
-pushd $TEMP_DIR >/dev/null
 
 if whiptail --backtitle "Proxmox VE Helper Scripts" --title "Docker VM" --yesno "This will create a New Docker VM. Proceed?" 10 58; then
   :
@@ -542,7 +426,6 @@ post_to_api_vm
 # ==============================================================================
 # STORAGE SELECTION
 # ==============================================================================
-echo ""
 msg_info "Validating Storage"
 while read -r line; do
   TAG=$(echo $line | awk '{print $1}')
@@ -563,6 +446,8 @@ if [ -z "$VALID" ]; then
 elif [ $((${#STORAGE_MENU[@]} / 3)) -eq 1 ]; then
   STORAGE=${STORAGE_MENU[0]}
 else
+  if [ -n "$SPINNER_PID" ] && ps -p $SPINNER_PID >/dev/null; then kill $SPINNER_PID >/dev/null; fi
+  printf "\e[?25h"
   while [ -z "${STORAGE:+x}" ]; do
     STORAGE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "Storage Pools" --radiolist \
       "Which storage pool would you like to use for ${HN}?\nTo make a selection, use the Spacebar.\n" \
@@ -589,12 +474,18 @@ fi
 # ==============================================================================
 msg_info "Retrieving the URL for the ${OS_DISPLAY} Qcow2 Disk Image"
 URL=$(get_image_url)
-sleep 2
+CACHE_DIR="/var/lib/vz/template/cache"
+CACHE_FILE="$CACHE_DIR/$(basename "$URL")"
+mkdir -p "$CACHE_DIR"
 msg_ok "${CL}${BL}${URL}${CL}"
-curl -f#SL -o "$(basename "$URL")" "$URL"
-echo -en "\e[1A\e[0K"
-FILE=$(basename $URL)
-msg_ok "Downloaded ${CL}${BL}${FILE}${CL}"
+
+if [[ ! -s "$CACHE_FILE" ]]; then
+  curl -f#SL -o "$CACHE_FILE" "$URL"
+  echo -en "\e[1A\e[0K"
+  msg_ok "Downloaded ${CL}${BL}$(basename "$CACHE_FILE")${CL}"
+else
+  msg_ok "Using cached image ${CL}${BL}$(basename "$CACHE_FILE")${CL}"
+fi
 
 # ==============================================================================
 # STORAGE TYPE DETECTION
@@ -604,67 +495,60 @@ case $STORAGE_TYPE in
 nfs | dir)
   DISK_EXT=".qcow2"
   DISK_REF="$VMID/"
-  DISK_IMPORT="-format qcow2"
+  DISK_IMPORT="--format qcow2"
   THIN=""
   ;;
 btrfs)
   DISK_EXT=".raw"
   DISK_REF="$VMID/"
-  DISK_IMPORT="-format raw"
+  DISK_IMPORT="--format raw"
   FORMAT=",efitype=4m"
   THIN=""
   ;;
+*)
+  DISK_EXT=""
+  DISK_REF=""
+  DISK_IMPORT="--format raw"
+  ;;
 esac
 
-for i in {0,1}; do
-  disk="DISK$i"
-  eval DISK${i}=vm-${VMID}-disk-${i}${DISK_EXT:-}
-  eval DISK${i}_REF=${STORAGE}:${DISK_REF:-}${!disk}
-done
+# ==============================================================================
+# IMAGE CUSTOMIZATION WITH DOCKER
+# ==============================================================================
+msg_info "Preparing ${OS_DISPLAY} image with Docker"
 
-# ==============================================================================
-# IMAGE CUSTOMIZATION
-# ==============================================================================
-echo -e "${INFO}${BOLD}${GN}Preparing ${OS_DISPLAY} Qcow2 Disk Image${CL}"
+WORK_FILE=$(mktemp --suffix=.qcow2)
+cp "$CACHE_FILE" "$WORK_FILE"
 
 export LIBGUESTFS_BACKEND_SETTINGS=dns=8.8.8.8,1.1.1.1
 
-# Create Docker installation scripts
-create_docker_install_script "${FILE}" "$INSTALL_PORTAINER"
+DOCKER_PREINSTALLED="no"
 
-if [ "$INSTALL_PORTAINER" = "yes" ]; then
-  create_portainer_script "${FILE}"
-fi
-
-create_docker_service "${FILE}"
-
-# Try to install packages during image customization
-DOCKER_INSTALLED_ON_FIRST_BOOT="yes"
-
-msg_info "Installing base packages (qemu-guest-agent, curl, ca-certificates)"
-if virt-customize -a "${FILE}" --install qemu-guest-agent,curl,ca-certificates >/dev/null 2>&1; then
+# Install qemu-guest-agent and Docker during image customization
+msg_info "Installing base packages in image"
+if virt-customize -a "$WORK_FILE" --install qemu-guest-agent,curl,ca-certificates >/dev/null 2>&1; then
   msg_ok "Installed base packages"
 
-  msg_info "Installing Docker via get.docker.com"
-  if virt-customize -q -a "${FILE}" --run-command "curl -fsSL https://get.docker.com | sh" >/dev/null 2>&1 &&
-    virt-customize -q -a "${FILE}" --run-command "systemctl enable docker" >/dev/null 2>&1; then
+  msg_info "Installing Docker (this may take 2-5 minutes)"
+  if virt-customize -q -a "$WORK_FILE" --run-command "curl -fsSL https://get.docker.com | sh" >/dev/null 2>&1 &&
+    virt-customize -q -a "$WORK_FILE" --run-command "systemctl enable docker" >/dev/null 2>&1; then
     msg_ok "Installed Docker"
 
+    msg_info "Configuring Docker daemon"
     # Optimize Docker daemon configuration
-    virt-customize -q -a "${FILE}" --run-command "mkdir -p /etc/docker" >/dev/null 2>&1
-    virt-customize -q -a "${FILE}" --run-command "cat > /etc/docker/daemon.json << 'DOCKEREOF'
+    virt-customize -q -a "$WORK_FILE" --run-command "mkdir -p /etc/docker" >/dev/null 2>&1
+    virt-customize -q -a "$WORK_FILE" --run-command 'cat > /etc/docker/daemon.json << EOF
 {
-  \"storage-driver\": \"overlay2\",
-  \"log-driver\": \"json-file\",
-  \"log-opts\": {
-    \"max-size\": \"10m\",
-    \"max-file\": \"3\"
+  "storage-driver": "overlay2",
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
   }
 }
-DOCKEREOF" >/dev/null 2>&1
-
-    virt-customize -q -a "${FILE}" --run-command "touch /root/.docker-installed" >/dev/null 2>&1
-    DOCKER_INSTALLED_ON_FIRST_BOOT="no"
+EOF' >/dev/null 2>&1
+    DOCKER_PREINSTALLED="yes"
+    msg_ok "Configured Docker daemon"
   else
     msg_ok "Docker will be installed on first boot"
   fi
@@ -672,57 +556,152 @@ else
   msg_ok "Packages will be installed on first boot"
 fi
 
-# Set hostname and clean machine-id
-virt-customize -q -a "${FILE}" --hostname "${HN}" >/dev/null 2>&1
-virt-customize -q -a "${FILE}" --run-command "truncate -s 0 /etc/machine-id" >/dev/null 2>&1
-virt-customize -q -a "${FILE}" --run-command "rm -f /var/lib/dbus/machine-id" >/dev/null 2>&1
+msg_info "Finalizing image (hostname, SSH config)"
+# Set hostname and prepare for unique machine-id
+virt-customize -q -a "$WORK_FILE" --hostname "${HN}" >/dev/null 2>&1 || true
+virt-customize -q -a "$WORK_FILE" --run-command "truncate -s 0 /etc/machine-id" >/dev/null 2>&1 || true
+virt-customize -q -a "$WORK_FILE" --run-command "rm -f /var/lib/dbus/machine-id" >/dev/null 2>&1 || true
 
 # Configure SSH for Cloud-Init
 if [ "$USE_CLOUD_INIT" = "yes" ]; then
-  virt-customize -q -a "${FILE}" --run-command "sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config" >/dev/null 2>&1 || true
-  virt-customize -q -a "${FILE}" --run-command "sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config" >/dev/null 2>&1 || true
+  virt-customize -q -a "$WORK_FILE" --run-command "sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config" >/dev/null 2>&1 || true
+  virt-customize -q -a "$WORK_FILE" --run-command "sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config" >/dev/null 2>&1 || true
+else
+  # Configure auto-login for nocloud images (no Cloud-Init)
+  virt-customize -q -a "$WORK_FILE" --run-command "mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d" >/dev/null 2>&1 || true
+  virt-customize -q -a "$WORK_FILE" --run-command 'cat > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf << EOF
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --noclear %I \$TERM
+EOF' >/dev/null 2>&1 || true
+  virt-customize -q -a "$WORK_FILE" --run-command "mkdir -p /etc/systemd/system/getty@tty1.service.d" >/dev/null 2>&1 || true
+  virt-customize -q -a "$WORK_FILE" --run-command 'cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf << EOF
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --noclear %I \$TERM
+EOF' >/dev/null 2>&1 || true
+fi
+msg_ok "Finalized image"
+
+# Create first-boot Docker install script (fallback if virt-customize failed)
+if [ "$DOCKER_PREINSTALLED" = "no" ]; then
+  if virt-customize -q -a "$WORK_FILE" --run-command 'cat > /root/install-docker.sh << "DOCKERSCRIPT"
+#!/bin/bash
+exec > /var/log/install-docker.log 2>&1
+echo "[$(date)] Starting Docker installation"
+
+for i in {1..30}; do
+  ping -c 1 8.8.8.8 >/dev/null 2>&1 && break
+  sleep 2
+done
+
+apt-get update
+apt-get install -y qemu-guest-agent curl ca-certificates
+curl -fsSL https://get.docker.com | sh
+systemctl enable docker
+systemctl start docker
+
+mkdir -p /etc/docker
+cat > /etc/docker/daemon.json << DAEMON
+{
+  "storage-driver": "overlay2",
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "10m", "max-file": "3" }
+}
+DAEMON
+systemctl restart docker
+
+touch /root/.docker-installed
+echo "[$(date)] Docker installation completed"
+DOCKERSCRIPT
+chmod +x /root/install-docker.sh' >/dev/null 2>&1; then
+
+    virt-customize -q -a "$WORK_FILE" --run-command 'cat > /etc/systemd/system/install-docker.service << "DOCKERSERVICE"
+[Unit]
+Description=Install Docker on First Boot
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/root/.docker-installed
+
+[Service]
+Type=oneshot
+ExecStart=/root/install-docker.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+DOCKERSERVICE
+systemctl enable install-docker.service' >/dev/null 2>&1 || true
+  else
+    msg_warn "virt-customize failed for this image. Docker must be installed manually after first boot:"
+    msg_warn "  curl -fsSL https://get.docker.com | sh"
+  fi
 fi
 
-# Expand disk
-msg_info "Expanding root partition to use full disk space"
-qemu-img create -f qcow2 expanded.qcow2 ${DISK_SIZE} >/dev/null 2>&1
-virt-resize --quiet --expand /dev/sda1 ${FILE} expanded.qcow2 >/dev/null 2>&1
-mv expanded.qcow2 ${FILE} >/dev/null 2>&1
-msg_ok "Expanded image to full size"
+# Resize disk to target size
+msg_info "Resizing disk image to ${DISK_SIZE}"
+qemu-img resize "$WORK_FILE" "${DISK_SIZE}" >/dev/null 2>&1
+msg_ok "Resized disk image"
 
 # ==============================================================================
 # VM CREATION
 # ==============================================================================
-msg_info "Creating Docker VM"
+msg_info "Creating Docker VM shell"
 
 qm create $VMID -agent 1${MACHINE} -tablet 0 -localtime 1 -bios ovmf${CPU_TYPE} -cores $CORE_COUNT -memory $RAM_SIZE \
-  -name $HN -tags community-script -net0 virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU -onboot 1 -ostype l26 -scsihw virtio-scsi-pci
+  -name $HN -tags community-script -net0 virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU -onboot 1 -ostype l26 -scsihw virtio-scsi-pci >/dev/null
 
-pvesm alloc $STORAGE $VMID $DISK0 4M 1>&/dev/null
-qm importdisk $VMID ${FILE} $STORAGE ${DISK_IMPORT:-} 1>&/dev/null
-qm set $VMID \
-  -efidisk0 ${DISK0_REF}${FORMAT} \
-  -scsi0 ${DISK1_REF},${DISK_CACHE}${THIN}size=${DISK_SIZE} \
-  -boot order=scsi0 \
-  -serial0 socket >/dev/null
-qm set $VMID --agent enabled=1 >/dev/null
+msg_ok "Created VM shell"
 
-# Proxmox 9: Enable I/O Thread
-if [ "${PVE_MAJOR:-8}" = "9" ]; then
-  qm set $VMID -iothread 1 >/dev/null 2>&1 || true
+# ==============================================================================
+# DISK IMPORT
+# ==============================================================================
+msg_info "Importing disk into storage ($STORAGE)"
+
+if qm disk import --help >/dev/null 2>&1; then
+  IMPORT_CMD=(qm disk import)
+else
+  IMPORT_CMD=(qm importdisk)
 fi
 
-msg_ok "Created Docker VM ${CL}${BL}(${HN})${CL}"
+IMPORT_OUT="$("${IMPORT_CMD[@]}" "$VMID" "$WORK_FILE" "$STORAGE" ${DISK_IMPORT:-} 2>&1 || true)"
+DISK_REF_IMPORTED="$(printf '%s\n' "$IMPORT_OUT" | sed -n "s/.*successfully imported disk '\([^']\+\)'.*/\1/p" | tr -d "\r\"'")"
+[[ -z "$DISK_REF_IMPORTED" ]] && DISK_REF_IMPORTED="$(pvesm list "$STORAGE" | awk -v id="$VMID" '$5 ~ ("vm-"id"-disk-") {print $1":"$5}' | sort | tail -n1)"
+[[ -z "$DISK_REF_IMPORTED" ]] && {
+  msg_error "Unable to determine imported disk reference."
+  echo "$IMPORT_OUT"
+  exit 226
+}
+
+msg_ok "Imported disk (${CL}${BL}${DISK_REF_IMPORTED}${CL})"
+
+# Clean up work file
+rm -f "$WORK_FILE"
+
+# ==============================================================================
+# VM CONFIGURATION
+# ==============================================================================
+msg_info "Attaching EFI and root disk"
+
+qm set "$VMID" \
+  --efidisk0 "${STORAGE}:0,efitype=4m" \
+  --scsi0 "${DISK_REF_IMPORTED},${DISK_CACHE}${THIN%,}" \
+  --boot order=scsi0 \
+  --serial0 socket >/dev/null
+
+qm set $VMID --agent enabled=1 >/dev/null
+
+msg_ok "Attached EFI and root disk"
+
+# Set VM description
+set_description
 
 # Cloud-Init configuration
 if [ "$USE_CLOUD_INIT" = "yes" ]; then
   msg_info "Configuring Cloud-Init"
-  setup_cloud_init "$VMID" "$STORAGE" "$HN" "yes" >/dev/null 2>&1
+  setup_cloud_init "$VMID" "$STORAGE" "$HN" "yes"
   msg_ok "Cloud-Init configured"
 fi
-
-# Set description
-set_description
 
 # Start VM
 if [ "$START_VM" == "yes" ]; then
@@ -736,40 +715,29 @@ fi
 # ==============================================================================
 VM_IP=""
 if [ "$START_VM" == "yes" ]; then
-  # Disable error exit for optional IP retrieval
   set +e
-  for i in {1..5}; do
+  for i in {1..10}; do
     VM_IP=$(qm guest cmd "$VMID" network-get-interfaces 2>/dev/null |
       jq -r '.[] | select(.name != "lo") | ."ip-addresses"[]? | select(."ip-address-type" == "ipv4") | ."ip-address"' 2>/dev/null |
       grep -v "^127\." | head -1) || true
     [ -n "$VM_IP" ] && break
-    sleep 2
+    sleep 3
   done
   set -e
 fi
 
-echo -e "\n${INFO}${BOLD}${GN}VM Configuration Summary:${CL}"
+echo -e "\n${INFO}${BOLD}${GN}Docker VM Configuration Summary:${CL}"
 echo -e "${TAB}${DGN}VM ID: ${BGN}${VMID}${CL}"
 echo -e "${TAB}${DGN}Hostname: ${BGN}${HN}${CL}"
 echo -e "${TAB}${DGN}OS: ${BGN}${OS_DISPLAY}${CL}"
-
 [ -n "$VM_IP" ] && echo -e "${TAB}${DGN}IP Address: ${BGN}${VM_IP}${CL}"
 
-if [ "$DOCKER_INSTALLED_ON_FIRST_BOOT" = "yes" ]; then
-  echo -e "${TAB}${DGN}Docker: ${BGN}Will be installed on first boot${CL}"
-  echo -e "${TAB}${YW}⚠️  Wait 2-3 minutes after boot for installation to complete${CL}"
-  echo -e "${TAB}${YW}⚠️  Check progress: ${BL}cat /var/log/install-docker.log${CL}"
+if [ "$DOCKER_PREINSTALLED" = "yes" ]; then
+  echo -e "${TAB}${DGN}Docker: ${BGN}Pre-installed (via get.docker.com)${CL}"
 else
-  echo -e "${TAB}${DGN}Docker: ${BGN}Latest (via get.docker.com)${CL}"
-fi
-
-if [ "$INSTALL_PORTAINER" = "yes" ]; then
-  if [ -n "$VM_IP" ]; then
-    echo -e "${TAB}${DGN}Portainer: ${BGN}https://${VM_IP}:9443${CL}"
-  else
-    echo -e "${TAB}${DGN}Portainer: ${BGN}https://<VM-IP>:9443${CL}"
-    echo -e "${TAB}${YW}⚠️  Get IP: ${BL}qm guest cmd ${VMID} network-get-interfaces${CL}"
-  fi
+  echo -e "${TAB}${DGN}Docker: ${BGN}Installing on first boot${CL}"
+  echo -e "${TAB}${YW}⚠️  Wait 2-3 minutes for installation to complete${CL}"
+  echo -e "${TAB}${YW}⚠️  Check progress: ${BL}cat /var/log/install-docker.log${CL}"
 fi
 
 if [ "$USE_CLOUD_INIT" = "yes" ]; then

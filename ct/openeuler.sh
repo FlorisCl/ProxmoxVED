@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/build.func)
+source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main/misc/build.func)
+
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVED/raw/main/LICENSE
 # Source: https://www.openeuler.org/
 
 # NOTE: openEuler has a PVE compatibility issue
-# PVE's post_create_hook expects /etc/redhat-release which openEuler doesn't have by default
-# We handle this in build.func by creating the file after container creation
+# PVE detects openEuler templates as ostype 'centos', but the templates ship
+# without /etc/redhat-release, so PVE's post_create_hook aborts pct create.
+# build.func patches the cached template once (injects /etc/redhat-release)
+# right before pct create, see template_patch step in build_container().
 
 APP="openEuler"
 var_tags="${var_tags:-os}"
@@ -16,6 +19,7 @@ var_ram="${var_ram:-512}"
 var_disk="${var_disk:-4}"
 var_os="${var_os:-openeuler}"
 var_version="${var_version:-25.03}"
+var_arm64="${var_arm64:-no}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"

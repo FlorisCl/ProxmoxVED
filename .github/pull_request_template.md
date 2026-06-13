@@ -16,6 +16,14 @@ Link: #
 
 ---
 
+## 🏗️ arm64 Support (**X** in brackets)
+
+- [ ] **arm64 supported** - Tested and supported on arm64.
+- [ ] **arm64 not tested** - Assumed to work on arm64, but testing has not been done.
+- [ ] **arm64 not supported** - Confirmed upstream dependencies or binaries do not support arm64.
+
+---
+
 ## 🛠️ Type of Change (**X** in brackets)  
 
 - [ ] 🐞 **Bug fix** – Resolves an issue without breaking functionality.  
@@ -42,9 +50,17 @@ Link: #
 
 ## 📦 Application Requirements (for new scripts)
 
+> ⚠️ Do not remove this section.
+> It is used by automated PR validation checks.
+> If this PR is not a new script submission, leave the checkboxes unchecked.
+
 > Required for **🆕 New script** submissions.  
 > Pull requests that do not meet these requirements may be closed without review.
 - [ ] The application is **at least 6 months old**
 - [ ] The application is **actively maintained**
 - [ ] The application has **600+ GitHub stars**
 - [ ] Official **release tarballs** are published
+- [ ] I understand that not all scripts will be accepted due to various reasons and criteria by the community-scripts ORG
+
+## 🌐 Source
+<!-- Add any sources and github links. -->  

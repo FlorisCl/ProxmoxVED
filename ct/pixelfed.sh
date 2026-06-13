@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main/misc/build.func)
+
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVED/raw/main/LICENSE
@@ -12,6 +13,7 @@ var_ram="${var_ram:-2048}"
 var_disk="${var_disk:-10}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
+var_arm64="${var_arm64:-no}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -34,16 +36,12 @@ function update_script() {
     systemctl stop pixelfed-horizon pixelfed-scheduler.timer
     msg_ok "Services stopped"
 
-    msg_info "Backing up Configuration"
-    cp /opt/pixelfed/.env /tmp/pixelfed.env.bak
-    msg_ok "Configuration backed up"
+    create_backup /opt/pixelfed/.env \
+        /opt/pixelfed/storage
 
-    fetch_and_deploy_gh_release "pixelfed" "pixelfed/pixelfed" "tarball" "latest" "/opt/pixelfed"
+    CLEAN_INSTALL=1 fetch_and_deploy_gh_release "pixelfed" "pixelfed/pixelfed" "tarball" "latest" "/opt/pixelfed"
 
-    msg_info "Restoring Configuration"
-    cp /tmp/pixelfed.env.bak /opt/pixelfed/.env
-    rm -f /tmp/pixelfed.env.bak
-    msg_ok "Configuration restored"
+    restore_backup
 
     msg_info "Updating Pixelfed"
     chown -R pixelfed:pixelfed /opt/pixelfed
@@ -51,6 +49,7 @@ function update_script() {
     chmod -R 775 /opt/pixelfed/storage /opt/pixelfed/bootstrap/cache
     export COMPOSER_ALLOW_SUPERUSER=1
     $STD composer install --no-dev --no-ansi --no-interaction --optimize-autoloader
+    $STD sudo -u pixelfed php artisan storage:link
     $STD sudo -u pixelfed php artisan migrate --force
     $STD sudo -u pixelfed php artisan route:cache
     $STD sudo -u pixelfed php artisan view:cache
@@ -76,5 +75,3 @@ echo -e "${INFO}${YW} Access it using the following URL:${CL}"
 echo -e "${TAB}${GATEWAY}${BGN}http://${IP}${CL}"
 echo -e "${INFO}${YW} Create an admin account with:${CL}"
 echo -e "${TAB}cd /opt/pixelfed && sudo -u pixelfed php artisan user:create"
-echo -e "${INFO}${YW} Credentials saved in:${CL}"
-echo -e "${TAB}/root/pixelfed.creds"
